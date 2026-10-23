@@ -1,3 +1,5 @@
+#import <Foundation/Foundation.h>
+
 // Kotlin/Native classes exported by KMPMobileChat.framework (Twitch 31.x chat)
 @interface KMPMCMessageTokenTextToken : NSObject
 @property (readonly) NSString *text;

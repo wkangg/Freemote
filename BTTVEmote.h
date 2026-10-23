@@ -1,3 +1,5 @@
+#import <Foundation/Foundation.h>
+
 typedef enum {
     BTTV, FFZ, BTTVGlobal, FFZGlobal
 } EmoteType;
