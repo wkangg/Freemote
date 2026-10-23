@@ -718,6 +718,13 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     // Several channels' chats can be joined at once (e.g. your own in the background), so use the message's channel
     NSString *messageID = chatMessageID(self);
     NSString *channelID = messageID ? [channelIDsByMessageID objectForKey:messageID] : nil;
+    // Messages from other event types (e.g. resubs) aren't tagged, but carry the chat's ID in room-id
+    if(!channelID) {
+        NSDictionary *tags = self.messageTags;
+        NSString *roomID = [tags isKindOfClass:[NSDictionary class]] ? tags[@"room-id"] : nil;
+        if(isChannelID(roomID))
+            channelID = roomID;
+    }
     if(!channelID)
         channelID = sentMessageChannelID(self);
     if(!channelID)
