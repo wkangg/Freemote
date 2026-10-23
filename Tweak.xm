@@ -28,10 +28,11 @@ static NSCache<NSString *, NSString *> *channelIDsByNonce;
 static NSString *lastSentChannelID; // @synchronized(channelIDsByName)
 
 // Zero-width and blank characters that chat clients add to get around Twitch's duplicate message check, and control
-// characters (e.g. a line ending left on the message)
+// characters (e.g. a line ending left on the message). Also spaces other than U+0020, which words aren't split at.
 static BOOL isInvisibleCharacter(UTF32Char c) {
-    return c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0xA0 || c == 0xAD || c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x2060 && c <= 0x2064)
-        || c == 0x2800 || c == 0x3164 || (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFEFF || (c >= 0xE0000 && c <= 0xE007F);
+    return c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0xA0 || c == 0xAD || c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x1680 || c == 0x180E
+        || (c >= 0x2000 && c <= 0x200F) || c == 0x2028 || c == 0x2029 || c == 0x202F || (c >= 0x205F && c <= 0x2064)
+        || c == 0x2800 || c == 0x3000 || c == 0x3164 || (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFEFF || (c >= 0xE0000 && c <= 0xE007F);
 }
 
 // The range of the word without invisible characters at either end
