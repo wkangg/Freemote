@@ -14,4 +14,6 @@
 
 // The channel ID of a VOD's streamer, or nil
 - (NSString *)ownerIDForVideoID:(NSString *)videoID;
+// The channel ID for a login name, or nil
+- (NSString *)channelIDForLogin:(NSString *)login;
 @end

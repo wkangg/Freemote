@@ -741,6 +741,8 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
 
 %end
 
+static void joinedChannel(id channelID);
+
 %group KMPConnectionManager
 
 %hook ChatConnectionManager
@@ -752,6 +754,19 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
             channelIDsByName[key] = channelID;
         }
         FMLog("Joining chat %{public}@ (%{public}@)", key, channelID);
+    } else if(key.length) {
+        // The ID is optional in Kotlin (join(String, String?)), and without it the channel repositories aren't asked
+        // either, so look it up by name
+        FMLog("Joining chat %{public}@ without a channel ID", key);
+        dispatch_async(emoteQueue, ^{
+            NSString *lookedUpID = [emoteManager.httpClient channelIDForLogin:key];
+            if(!isChannelID(lookedUpID))
+                return;
+            @synchronized(channelIDsByName) {
+                channelIDsByName[key] = lookedUpID;
+            }
+            joinedChannel(lookedUpID);
+        });
     }
     return %orig;
 }

@@ -37,18 +37,35 @@
 
 
 - (NSString *)ownerIDForVideoID:(NSString *)videoID {
+    NSDate *start = [NSDate date];
+    NSString *ownerID = [self gqlString:@"query($id: ID!) { video(id: $id) { owner { id } } }" variables:@{@"id": videoID} path:@[@"video", @"owner", @"id"]];
+    if(!ownerID)
+        FMLog("Couldn't find the owner of video %{public}@ after %.1fs", videoID, -start.timeIntervalSinceNow);
+    else
+        FMLog("Video %{public}@ is from channel %{public}@ (%.1fs)", videoID, ownerID, -start.timeIntervalSinceNow);
+    return ownerID;
+}
+
+- (NSString *)channelIDForLogin:(NSString *)login {
+    NSDate *start = [NSDate date];
+    NSString *channelID = [self gqlString:@"query($login: String!) { user(login: $login) { id } }" variables:@{@"login": login} path:@[@"user", @"id"]];
+    if(!channelID)
+        FMLog("Couldn't find the channel ID of %{public}@ after %.1fs", login, -start.timeIntervalSinceNow);
+    else
+        FMLog("Chat %{public}@ is channel %{public}@ (%.1fs)", login, channelID, -start.timeIntervalSinceNow);
+    return channelID;
+}
+
+// The string at `path` under the response's data, or nil
+- (NSString *)gqlString:(NSString *)query variables:(NSDictionary *)variables path:(NSArray<NSString *> *)path {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gql.twitch.tv/gql"]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 5;
     // Twitch's web client ID, which takes arbitrary queries
     [request setValue:@"kimne78kx3ncx6brgo4mv6wki5h1ko" forHTTPHeaderField:@"Client-ID"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{
-        @"query": @"query($id: ID!) { video(id: $id) { owner { id } } }",
-        @"variables": @{@"id": videoID}
-    } options:0 error:nil];
+    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"query": query, @"variables": variables} options:0 error:nil];
 
-    NSDate *start = [NSDate date];
     __block NSData *data;
     __block NSError *error;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
@@ -59,16 +76,15 @@
     }] resume];
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
-    // data.video.owner.id, where any level can be null
-    id ownerID = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    for(NSString *key in @[@"data", @"video", @"owner", @"id"])
-        ownerID = [ownerID isKindOfClass:[NSDictionary class]] ? ownerID[key] : nil;
-    if(![ownerID isKindOfClass:[NSString class]]) {
-        FMLog("Couldn't find the owner of video %{public}@ after %.1fs (%lu bytes): %{public}@", videoID, -start.timeIntervalSinceNow, (unsigned long)data.length, error.localizedDescription);
+    // Any level can be null
+    id value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    for(NSString *key in [@[@"data"] arrayByAddingObjectsFromArray:path])
+        value = [value isKindOfClass:[NSDictionary class]] ? value[key] : nil;
+    if(![value isKindOfClass:[NSString class]]) {
+        FMLog("GQL query failed (%lu bytes): %{public}@", (unsigned long)data.length, error.localizedDescription);
         return nil;
     }
-    FMLog("Video %{public}@ is from channel %{public}@ (%.1fs)", videoID, ownerID, -start.timeIntervalSinceNow);
-    return ownerID;
+    return value;
 }
 
 - (NSDictionary *)getJSON:(NSURL *)url {
