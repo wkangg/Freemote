@@ -57,7 +57,7 @@ static NSRange visibleRange(NSString *word) {
 static NSString *codePointsOf(NSString *word) {
     NSMutableArray *codePoints = [[NSMutableArray alloc] init];
     NSData *utf32 = [word dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
-    const uint32_t *chars = utf32.bytes;
+    const uint32_t *chars = (const uint32_t *)utf32.bytes;
     for(NSUInteger i = 0; i < utf32.length / 4; i++)
         [codePoints addObject:[NSString stringWithFormat:@"U+%04X", chars[i]]];
     return [codePoints componentsJoinedByString:@" "];
