@@ -34,7 +34,9 @@
     dispatch_group_async(group, queue, ^{ bttvEmoteInfo = [httpClient bttvEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ ffzEmoteInfo = [httpClient ffzEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ sevenTVEmoteInfo = [httpClient sevenTVEmoteInformationForChannelID:channelID]; });
-    dispatch_group_async(group, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
+    // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
+    dispatch_group_t sizeGroup = dispatch_group_create();
+    dispatch_group_async(sizeGroup, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     if(needsGlobals) {
@@ -60,7 +62,6 @@
     }
 
     ffz = [self addEmoteInfo:ffzEmoteInfo toRegistry:registry nameRegistry:nameRegistry type:FFZ];
-    [self addFFZSizes:ffzRoom toRegistry:registry];
 
     if([sevenTVEmoteInfo isKindOfClass:[NSDictionary class]] && [sevenTVEmoteInfo[@"emote_set"] isKindOfClass:[NSDictionary class]])
         sevenTV = [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
@@ -73,6 +74,9 @@
     // ID registry first: a message can only use a name once its image URL resolves
     self.emoteRegistry = registry;
     self.channelNameRegistries = channelNameRegistries;
+
+    // Sizes land on the same emote objects, so messages after this show FFZ emotes at their own size
+    dispatch_group_notify(sizeGroup, queue, ^{ [self addFFZSizes:ffzRoom toRegistry:registry]; });
 }
 
 - (BOOL)hasEmotesForChannel:(NSString *)channelID {
