@@ -379,8 +379,11 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             offset += codePointCount(piece);
         }, ^(NSString *name, NSString *emoteID) {
             NSUInteger length = codePointCount(name);
+            // Apollo caches EmbeddedEmotes by ID, so it includes the position: with just the emote ID, every use of
+            // the emote would share the from/to of whichever comment loaded last
+            NSString *embeddedID = [NSString stringWithFormat:@"%@;%lu;%lu", emoteID, (unsigned long)offset, (unsigned long)(offset + length - 1)];
             [newFragments addObject:@{@"__typename": fragmentType, @"text": name, @"mention": [NSNull null], @"emote": @{
-                @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": emoteID, @"setID": @"", @"from": @(offset), @"to": @(offset + length - 1)
+                @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": embeddedID, @"setID": @"", @"from": @(offset), @"to": @(offset + length - 1)
             }}];
             offset += length;
             (*emoteCount)++;
