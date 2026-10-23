@@ -17,13 +17,14 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens) {
 
     NSMutableArray *newTokens = [[NSMutableArray alloc] init];
     for(id token in tokens) {
-        // Flagged (AutoMod) text carries character ranges that splitting would invalidate
         KMPMCMessageTokenTextToken *textToken = token;
-        if(![token isKindOfClass:TextToken] || textToken.flags) {
+        if(![token isKindOfClass:TextToken]) {
             [newTokens addObject:token];
             continue;
         }
 
+        // flags is non-null in Kotlin and holds per-token AutoMod levels, so every split piece keeps it
+        id flags = textToken.flags;
         NSArray<NSString *> *words = [textToken.text componentsSeparatedByString:@" "];
         NSMutableString *pendingText = [[NSMutableString alloc] init];
         BOOL foundEmote = NO;
@@ -32,7 +33,7 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens) {
             if(emote) {
                 foundEmote = YES;
                 if(pendingText.length)
-                    [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:nil]];
+                    [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:flags]];
                 [pendingText setString:@""];
                 [newTokens addObject:[[EmoteToken alloc] initWithText:words[i] id:[FMEmoteIDPrefix stringByAppendingString:emote.emoteID]]];
             } else {
@@ -45,7 +46,7 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens) {
         if(!foundEmote)
             [newTokens addObject:token];
         else if(pendingText.length)
-            [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:nil]];
+            [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:flags]];
     }
 
     return newTokens;
@@ -92,10 +93,12 @@ static void hookKMPIfNeeded(void) {
 
         if(class_getInstanceMethod(messageInfo, @selector(tokens))
            && class_getInstanceMethod(TextToken, @selector(initWithText:flags:))
-           && class_getInstanceMethod(EmoteToken, @selector(initWithText:id:)))
+           && class_getInstanceMethod(EmoteToken, @selector(initWithText:id:))) {
             %init(KMP);
-        else
+            NSLog(@"[Freemote] Hooked chat messages");
+        } else {
             NSLog(@"[Freemote] KMPMobileChat API changed, not hooking chat messages");
+        }
     });
 }
 
@@ -103,6 +106,7 @@ static void joinedChannel(id channelID) {
     hookKMPIfNeeded();
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
+    NSLog(@"[Freemote] Joined channel %@", channel);
     if(channel.length == 0 || [channel rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location != NSNotFound)
         return;
 
@@ -111,6 +115,7 @@ static void joinedChannel(id channelID) {
             return;
         currentChannelID = channel;
         [emoteManager updateEmoteRegistry:channel];
+        NSLog(@"[Freemote] Loaded %lu emotes for channel %@", (unsigned long)emoteManager.emoteNameRegistry.count, channel);
     });
 }
 
