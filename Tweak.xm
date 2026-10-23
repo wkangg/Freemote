@@ -21,21 +21,84 @@ static NSCache<NSString *, NSString *> *channelIDsByMessageID;
 // VOD chat doesn't say whose video it is either, so that's looked up
 static NSCache<NSString *, NSString *> *channelIDsByVideoID;
 
+// Zero-width and blank characters that chat clients add to get around Twitch's duplicate message check
+static BOOL isInvisibleCharacter(UTF32Char c) {
+    return c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x2060 && c <= 0x2064)
+        || c == 0x2800 || c == 0x3164 || (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFEFF || (c >= 0xE0000 && c <= 0xE007F);
+}
+
+// The range of the word without invisible characters at either end
+static NSRange visibleRange(NSString *word) {
+    NSUInteger start = 0, end = word.length;
+    while(start < end) {
+        // Code points, not composed sequences: U+034F etc. are combining, so they'd join the letter before them
+        UTF32Char c = [word characterAtIndex:start];
+        if(CFStringIsSurrogateHighCharacter(c) && start + 1 < end)
+            c = CFStringGetLongCharacterForSurrogatePair(c, [word characterAtIndex:start + 1]);
+        if(!isInvisibleCharacter(c))
+            break;
+        start += c > 0xFFFF ? 2 : 1;
+    }
+    while(end > start) {
+        UTF32Char c = [word characterAtIndex:end - 1];
+        NSUInteger length = 1;
+        if(CFStringIsSurrogateLowCharacter(c) && end - 1 > start) {
+            c = CFStringGetLongCharacterForSurrogatePair([word characterAtIndex:end - 2], c);
+            length = 2;
+        }
+        if(!isInvisibleCharacter(c))
+            break;
+        end -= length;
+    }
+    return NSMakeRange(start, end - start);
+}
+
+static NSString *codePointsOf(NSString *word) {
+    NSMutableArray *codePoints = [[NSMutableArray alloc] init];
+    NSData *utf32 = [word dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
+    const uint32_t *chars = utf32.bytes;
+    for(NSUInteger i = 0; i < utf32.length / 4; i++)
+        [codePoints addObject:[NSString stringWithFormat:@"U+%04X", chars[i]]];
+    return [codePoints componentsJoinedByString:@" "];
+}
+
+// For finding other characters that keep a word from matching: logs non-ASCII words that are an emote name once
+// everything but letters and digits is taken out
+static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
+    if([word canBeConvertedToEncoding:NSASCIIStringEncoding])
+        return;
+    NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
+    if(stripped.length && nameRegistry[stripped])
+        FMLogFirst(10, "Word looks like emote %{public}@ but doesn't match: %{public}@", stripped, codePointsOf(word));
+}
+
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise
 static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
     NSMutableString *pendingText = [[NSMutableString alloc] init];
     BOOL foundEmote = NO;
     for(NSUInteger i = 0; i < words.count; i++) {
-        BTTVEmote *emote = nameRegistry[words[i]];
+        NSString *word = words[i];
+        NSRange nameRange = NSMakeRange(0, word.length);
+        BTTVEmote *emote = nameRegistry[word];
+        if(!emote && word.length) {
+            nameRange = visibleRange(word);
+            if(nameRange.length < word.length && nameRange.length)
+                emote = nameRegistry[[word substringWithRange:nameRange]];
+            if(!emote)
+                logNearMiss(word, nameRegistry);
+        }
+
         if(emote) {
             foundEmote = YES;
+            // Invisible characters around the name stay as text
+            [pendingText appendString:[word substringToIndex:nameRange.location]];
             if(pendingText.length)
                 onText([pendingText copy]);
-            [pendingText setString:@""];
-            onEmote(words[i], [FMEmoteIDPrefix stringByAppendingString:emote.emoteID]);
+            onEmote([word substringWithRange:nameRange], [FMEmoteIDPrefix stringByAppendingString:emote.emoteID]);
+            [pendingText setString:[word substringFromIndex:NSMaxRange(nameRange)]];
         } else {
-            [pendingText appendString:words[i]];
+            [pendingText appendString:word];
         }
         if(i + 1 < words.count)
             [pendingText appendString:@" "];
