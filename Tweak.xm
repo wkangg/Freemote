@@ -287,13 +287,13 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             continue;
         }
 
-        NSString *typename = fragment[@"__typename"] ?: @"VideoCommentMessageFragment";
+        NSString *fragmentType = fragment[@"__typename"] ?: @"VideoCommentMessageFragment";
         BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, ^(NSString *piece) {
-            [newFragments addObject:@{@"__typename": typename, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
+            [newFragments addObject:@{@"__typename": fragmentType, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
             offset += codePointCount(piece);
         }, ^(NSString *name, NSString *emoteID) {
             NSUInteger length = codePointCount(name);
-            [newFragments addObject:@{@"__typename": typename, @"text": name, @"mention": [NSNull null], @"emote": @{
+            [newFragments addObject:@{@"__typename": fragmentType, @"text": name, @"mention": [NSNull null], @"emote": @{
                 @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": emoteID, @"setID": @"", @"from": @(offset), @"to": @(offset + length - 1)
             }}];
             offset += length;
