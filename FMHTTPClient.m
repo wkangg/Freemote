@@ -27,6 +27,15 @@
     return [self getJSON:[NSURL URLWithString:@"https://7tv.io/v3/emote-sets/global"]];
 }
 
+- (NSDictionary *)ffzRoomForChannelID:(NSString *)channelID {
+    return [self getJSON:[NSURL URLWithString:[@"https://api.frankerfacez.com/v1/room/id/" stringByAppendingString:channelID]]];
+}
+
+- (NSDictionary *)ffzGlobalSets {
+    return [self getJSON:[NSURL URLWithString:@"https://api.frankerfacez.com/v1/set/global"]];
+}
+
+
 - (NSString *)ownerIDForVideoID:(NSString *)videoID {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gql.twitch.tv/gql"]];
     request.HTTPMethod = @"POST";

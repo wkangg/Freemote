@@ -22,22 +22,25 @@
     // Fetch everything in parallel; chat history waits on this
     FMHTTPClient *httpClient = _httpClient;
     BOOL needsGlobals = _globalEmoteRegistry.count == 0;
-    __block NSDictionary *bttvGlobalInfo, *ffzGlobalInfo, *sevenTVGlobalInfo, *bttvEmoteInfo, *ffzEmoteInfo, *sevenTVEmoteInfo;
+    __block NSDictionary *bttvGlobalInfo, *ffzGlobalInfo, *sevenTVGlobalInfo, *bttvEmoteInfo, *ffzEmoteInfo, *sevenTVEmoteInfo, *ffzGlobalSets, *ffzRoom;
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
     if(needsGlobals) {
         dispatch_group_async(group, queue, ^{ bttvGlobalInfo = [httpClient bttvGlobalEmotes]; });
         dispatch_group_async(group, queue, ^{ ffzGlobalInfo = [httpClient ffzGlobalEmotes]; });
         dispatch_group_async(group, queue, ^{ sevenTVGlobalInfo = [httpClient sevenTVGlobalEmotes]; });
+        dispatch_group_async(group, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
     }
     dispatch_group_async(group, queue, ^{ bttvEmoteInfo = [httpClient bttvEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ ffzEmoteInfo = [httpClient ffzEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ sevenTVEmoteInfo = [httpClient sevenTVEmoteInformationForChannelID:channelID]; });
+    dispatch_group_async(group, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     if(needsGlobals) {
         NSUInteger bttv = [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
         NSUInteger ffz = [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
+        [self addFFZSizes:ffzGlobalSets toRegistry:_globalEmoteRegistry];
         NSUInteger sevenTV = [sevenTVGlobalInfo isKindOfClass:[NSDictionary class]]
             ? [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal] : 0;
         self.globalNameRegistry = _globalEmoteNameRegistry;
@@ -57,6 +60,7 @@
     }
 
     ffz = [self addEmoteInfo:ffzEmoteInfo toRegistry:registry nameRegistry:nameRegistry type:FFZ];
+    [self addFFZSizes:ffzRoom toRegistry:registry];
 
     if([sevenTVEmoteInfo isKindOfClass:[NSDictionary class]] && [sevenTVEmoteInfo[@"emote_set"] isKindOfClass:[NSDictionary class]])
         sevenTV = [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
@@ -100,7 +104,36 @@
     return count;
 }
 
+// FFZ API response: {sets: {<set ID>: {emoticons: [{id, width, height, ...}]}}}. Sets the aspect ratio of the FFZ
+// emotes with the same ID in the registry.
+- (void)addFFZSizes:(NSDictionary *)ffzInfo toRegistry:(NSDictionary<NSString *, BTTVEmote *> *)registry {
+    NSDictionary *sets = [ffzInfo isKindOfClass:[NSDictionary class]] ? ffzInfo[@"sets"] : nil;
+    if(![sets isKindOfClass:[NSDictionary class]])
+        return;
+
+    NSUInteger count = 0;
+    for(NSDictionary *set in sets.allValues) {
+        NSArray *emoticons = [set isKindOfClass:[NSDictionary class]] ? set[@"emoticons"] : nil;
+        if(![emoticons isKindOfClass:[NSArray class]])
+            continue;
+        for(NSDictionary *emoticon in emoticons) {
+            if(![emoticon isKindOfClass:[NSDictionary class]] || ![emoticon[@"id"] isKindOfClass:[NSNumber class]]
+               || ![emoticon[@"width"] isKindOfClass:[NSNumber class]] || ![emoticon[@"height"] isKindOfClass:[NSNumber class]]
+               || [emoticon[@"height"] doubleValue] <= 0)
+                continue;
+            // Same ID suffix as BTTVEmote gives FFZ emotes
+            BTTVEmote *emote = registry[[[emoticon[@"id"] stringValue] stringByAppendingString:@"ffz"]];
+            if(emote.emoteType != FFZ && emote.emoteType != FFZGlobal)
+                continue;
+            emote.aspectRatio = [emoticon[@"width"] doubleValue] / [emoticon[@"height"] doubleValue];
+            count++;
+        }
+    }
+    FMLog("FFZ sizes for %lu emotes", (unsigned long)count);
+}
+
 - (NSURL *)imageURLForBTTVEmoteID:(NSString *)emoteID {
+
     BTTVEmote *emote = self.emoteRegistry[emoteID];
     if(emote) {
         if(emote.image2x)
