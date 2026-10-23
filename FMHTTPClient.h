@@ -1,6 +1,6 @@
 @interface FMHTTPClient : NSObject
-- (NSDictionary *)bttvEmoteInformationForChannelID:(NSNumber *)channelID;
-- (NSDictionary *)ffzEmoteInformationForChannelID:(NSNumber *)channelID;
+- (NSDictionary *)bttvEmoteInformationForChannelID:(NSString *)channelID;
+- (NSDictionary *)ffzEmoteInformationForChannelID:(NSString *)channelID;
 - (NSDictionary *)bttvGlobalEmotes;
 - (NSDictionary *)ffzGlobalEmotes;
 @end

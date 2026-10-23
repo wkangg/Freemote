@@ -2,12 +2,12 @@
 
 @implementation FMHTTPClient
 
-- (NSDictionary *)bttvEmoteInformationForChannelID:(NSNumber *)channelID {
-    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/users/twitch/" stringByAppendingString:[channelID stringValue]]]];  
+- (NSDictionary *)bttvEmoteInformationForChannelID:(NSString *)channelID {
+    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/users/twitch/" stringByAppendingString:channelID]]];  
 }
 
-- (NSDictionary *)ffzEmoteInformationForChannelID:(NSNumber *)channelID {
-    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/frankerfacez/users/twitch/" stringByAppendingString:[channelID stringValue]]]];
+- (NSDictionary *)ffzEmoteInformationForChannelID:(NSString *)channelID {
+    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/frankerfacez/users/twitch/" stringByAppendingString:channelID]]];
 }
 
 - (NSDictionary *)bttvGlobalEmotes {

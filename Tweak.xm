@@ -1,150 +1,157 @@
 #import "Tweak.h"
 #import "FMEmoteManager.h"
+#import <objc/runtime.h>
+
+// Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
+#define FMEmoteIDPrefix @"freemote_"
 
 static Class EmoteToken, TextToken;
 static FMEmoteManager *emoteManager;
-static NSMutableDictionary<NSString *, TWMessageStringLayerCheermoteAnimatedImageLayer *> *animatedEmoteSync;
+static dispatch_queue_t emoteQueue;
+static NSString *currentChannelID; // only touched on emoteQueue
 
-NSMutableArray* stringToBTTVTokenizedArray(NSString *string) {
-    NSMutableArray *tokens = [[NSMutableArray alloc] init];
-    for(NSString *component in [string componentsSeparatedByString:@" "]) {
-        if(emoteManager.emoteNameRegistry[component]) {
-            NSArray<NSString *> *stringSeparatedByEmoteText = [string componentsSeparatedByString:component];
-            NSObject *leftText = [[TextToken alloc] initWithText:stringSeparatedByEmoteText[0] autoModFlags:nil];
-            NSObject *emote = [[EmoteToken alloc] initWithEmoteId:emoteManager.emoteNameRegistry[component].emoteID emoteText:component];
-            [tokens addObject:leftText];
-            [tokens addObject:emote];
+static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens) {
+    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = emoteManager.emoteNameRegistry;
+    if(nameRegistry.count == 0)
+        return tokens;
 
-            NSString *rightText = stringSeparatedByEmoteText[1];
-            if(stringSeparatedByEmoteText.count > 2) {
-                rightText = [[stringSeparatedByEmoteText subarrayWithRange:NSMakeRange(1, stringSeparatedByEmoteText.count - 1)] componentsJoinedByString:component];
-            }
-            if(rightText) {
-                [tokens addObjectsFromArray:stringToBTTVTokenizedArray(rightText)];
-                return tokens;
-            }
-            else {
-                return tokens;
-            }
-        }
-    }
-
-    [tokens addObject:[[TextToken alloc] initWithText:string autoModFlags:nil]];
-    return tokens;
-}
-
-NSMutableArray* substituteBTTVStringsWithEmoteTokens(NSMutableArray *tokens) {
     NSMutableArray *newTokens = [[NSMutableArray alloc] init];
-    for(NSObject *token in tokens) {
-        if([token isKindOfClass:TextToken]) {
-            [newTokens addObjectsFromArray:stringToBTTVTokenizedArray([token performSelector:@selector(text)])];
-        } else {
+    for(id token in tokens) {
+        // Flagged (AutoMod) text carries character ranges that splitting would invalidate
+        KMPMCMessageTokenTextToken *textToken = token;
+        if(![token isKindOfClass:TextToken] || textToken.flags) {
             [newTokens addObject:token];
+            continue;
         }
+
+        NSArray<NSString *> *words = [textToken.text componentsSeparatedByString:@" "];
+        NSMutableString *pendingText = [[NSMutableString alloc] init];
+        BOOL foundEmote = NO;
+        for(NSUInteger i = 0; i < words.count; i++) {
+            BTTVEmote *emote = nameRegistry[words[i]];
+            if(emote) {
+                foundEmote = YES;
+                if(pendingText.length)
+                    [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:nil]];
+                [pendingText setString:@""];
+                [newTokens addObject:[[EmoteToken alloc] initWithText:words[i] id:[FMEmoteIDPrefix stringByAppendingString:emote.emoteID]]];
+            } else {
+                [pendingText appendString:words[i]];
+            }
+            if(i + 1 < words.count)
+                [pendingText appendString:@" "];
+        }
+
+        if(!foundEmote)
+            [newTokens addObject:token];
+        else if(pendingText.length)
+            [newTokens addObject:[[TextToken alloc] initWithText:[pendingText copy] flags:nil]];
     }
 
     return newTokens;
 }
 
-%hook TWChatMessage
+// Turns e.g. https://static-cdn.jtvnw.net/emoticons/v2/freemote_<id>/default/dark/2.0 into the BTTV/FFZ image URL
+static NSURL *rewriteEmoteURL(NSURL *url) {
+    NSString *path = url.path;
+    if(!path)
+        return url;
 
-- (id)initWithTokens:(NSMutableArray *)tokens senderIdentity:(id)arg2 badges:(id)arg3 date:(id)arg4 messageID:(id)arg5 liveMessageID:(id)arg6 color:(id)arg7 flags:(unsigned long long)arg8 kind:(long long)arg9 userModes:(unsigned long long)arg10 messageType:(id)arg11 messageTags:(id)arg12 {
-    tokens = substituteBTTVStringsWithEmoteTokens(tokens);
-    return %orig(tokens, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12);
+    NSRange prefixRange = [path rangeOfString:@"/" FMEmoteIDPrefix];
+    if(prefixRange.location == NSNotFound)
+        return url;
+
+    NSString *emoteID = [path substringFromIndex:NSMaxRange(prefixRange)].pathComponents.firstObject;
+    return [emoteManager imageURLForBTTVEmoteID:emoteID] ?: url;
+}
+
+%group KMP
+
+%hook KMPMCChatMessageInfo
+
+- (NSArray *)tokens {
+    NSArray *tokens = %orig;
+    return substituteBTTVStringsWithEmoteTokens(tokens);
 }
 
 %end
 
-%hook TWTwitchChatAdapter
-
-- (NSURL *)emoteImageURLForId:(NSString *)emoteID scale:(double)arg2 {
-    NSURL *imageURL = [emoteManager imageURLForBTTVEmoteID:emoteID];
-    if(imageURL) {
-        return imageURL;
-    }
-    return %orig;
-}
-
-- (void)joinChannel:(NSNumber *)channelID withMaybeUser:(id)arg2 {
-    %orig;
-    [emoteManager updateEmoteRegistry:channelID];
-}
-
 %end
 
-%hook TWMessageStringImageData
+// Kotlin/Native adds its ObjC methods in +initialize, so these hooks can only be installed once the
+// classes have been touched. Called from the chat join hooks, i.e. after the Kotlin runtime is up.
+static void hookKMPIfNeeded(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class messageInfo = objc_getClass("KMPMCChatMessageInfo");
+        TextToken = objc_getClass("KMPMCMessageTokenTextToken");
+        EmoteToken = objc_getClass("KMPMCMessageTokenEmoteToken");
+        [messageInfo class];
+        [TextToken class];
+        [EmoteToken class];
 
-- (id)initWithStaticURL:(NSURL *)arg1 animatedURL:(NSURL *)arg2 isAnimated:(BOOL)arg3 isAvatar:(BOOL)arg4 {
-    if([[arg1 absoluteString] containsString:@"betterttv"]) {
-        NSString *emoteUrl = arg1.absoluteString;
-        for(BTTVEmote *emote in emoteManager.emoteRegistry.allValues) {
-            if([emote.image1x.absoluteString isEqualToString:emoteUrl] || [emote.image2x.absoluteString isEqualToString:emoteUrl]) {
-               if(emote.isAnimated)
-                    return %orig(arg1, arg1, YES, arg4);
-                else
-                    break;
-            }
-        }
-    }
-    
-    return %orig;
+        if(class_getInstanceMethod(messageInfo, @selector(tokens))
+           && class_getInstanceMethod(TextToken, @selector(initWithText:flags:))
+           && class_getInstanceMethod(EmoteToken, @selector(initWithText:id:)))
+            %init(KMP);
+        else
+            NSLog(@"[Freemote] KMPMobileChat API changed, not hooking chat messages");
+    });
 }
 
-%end
+static void joinedChannel(id channelID) {
+    hookKMPIfNeeded();
 
-%hook TWMessageStringLayer
-
-- (BOOL)shouldAnimateCheermotes {
-    return YES;
-}
-
-- (void)setShouldAnimateCheermotes:(BOOL)animateCheermotes {
-    %orig(YES);
-}
-
-%end
-
-%hook TWMessageStringLayerCheermoteAnimatedImageLayer
-
-//For the dictionary, I use the image's address as the key rather than the image itself
-//Because the image cannot be copied using copyWithZone
-- (void)startAnimating {
-    %orig;
-
-    NSString *addressStr = [NSString stringWithFormat:@"%p", self.animatedImage];
-    if(animatedEmoteSync[addressStr]) {
-        [self setCurrentFrameIndex:animatedEmoteSync[addressStr].currentFrameIndex];
-    }
-    [animatedEmoteSync setObject:self forKey:addressStr];
-}
-
-%end
-
-%hook ChatViewController
-
-- (void)_presentEmoteCardIfNeededFor:(NSString *)emoteId with:(id)arg2 {
-    BTTVEmote *emote;
-
-    if((emote = emoteManager.emoteRegistry[emoteId])) {
-        NSString *message = emote.emoteType == BTTV || emote.emoteType == BTTVGlobal ? @"BTTV" : @"FrankerFaceZ";
-        if(emote.emoteType == BTTVGlobal || emote.emoteType == FFZGlobal)
-            message = [message stringByAppendingString:@" Global"];
-
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:emote.emoteText message:[message stringByAppendingString:@" Emote"] preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
+    NSString *channel = [NSString stringWithFormat:@"%@", channelID];
+    if(channel.length == 0 || [channel rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location != NSNotFound)
         return;
-    }
 
-    %orig;
+    dispatch_async(emoteQueue, ^{
+        if([channel isEqualToString:currentChannelID])
+            return;
+        currentChannelID = channel;
+        [emoteManager updateEmoteRegistry:channel];
+    });
+}
+
+// KMPMobileChat calls into these Swift repositories (through ObjC) when it joins a channel's chat
+%hook ChannelSettingsRepository
+
+- (id)observeChannelSettingsChannelId:(id)channelID {
+    joinedChannel(channelID);
+    return %orig;
+}
+
+%end
+
+%hook BitsConfigRepository
+
+- (id)observeBitsConfigForChannelChannelId:(id)channelID {
+    joinedChannel(channelID);
+    return %orig;
+}
+
+%end
+
+%hook NSURLRequest
+
+- (instancetype)initWithURL:(NSURL *)url cachePolicy:(NSURLRequestCachePolicy)cachePolicy timeoutInterval:(NSTimeInterval)timeoutInterval {
+    return %orig(rewriteEmoteURL(url), cachePolicy, timeoutInterval);
+}
+
+%end
+
+%hook NSMutableURLRequest
+
+- (void)setURL:(NSURL *)url {
+    %orig(rewriteEmoteURL(url));
 }
 
 %end
 
 %ctor {
-    %init(TWChatMessage = objc_getClass("TwitchKit.TWChatMessage"), ChatViewController = objc_getClass("Twitch.ChatViewController"));
-    EmoteToken = objc_getClass("TwitchKit.TWMessageEmoteToken");
-    TextToken = objc_getClass("TwitchKit.TWMessageTextToken");
+    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"),
+          BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"));
     emoteManager = [[FMEmoteManager alloc] init];
-    animatedEmoteSync = [[NSMutableDictionary alloc] init];
+    emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
 }

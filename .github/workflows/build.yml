@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "Direct URL to Decrypted IPA file"
+        type: string
+        required: true
+      create_release:
+        description: "Create draft release"
+        default: false
+        type: boolean
+
+jobs:
+  deb:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get package info
+        id: package_info
+        run: |
+          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+          echo "version=$(grep "Version:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Setup theos
+        uses: level3tjg/theos-action@main
+        with:
+          cache: true
+          cache-dir-theos: ${{ github.workspace }}/theos
+          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
+
+      # The repo has an old prebuilt deb checked in; don't upload it alongside the new ones
+      - name: Remove committed packages
+        run: rm -rf packages
+
+      - name: Build rootless deb
+        run: make package
+        env:
+          THEOS_PACKAGE_SCHEME: rootless
+
+      - name: Build rootful deb
+        run: make clean package
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
+          path: packages/*.deb
+          if-no-files-found: error
+
+  ipa:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get package info
+        id: package_info
+        run: |
+          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+          echo "version=$(grep "Version:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin rsync llvm xmlstarlet
+          curl -L https://github.com/libimobiledevice/libplist/releases/download/2.4.0/libplist-2.4.0.tar.bz2 | bzip2 -d | tar -x
+          cd libplist*
+          ./configure
+          sudo make install
+          sudo ldconfig
+
+      - name: Download IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+        run: |
+          echo "::add-mask::$IPA_URL"
+          # Some file hosts (e.g. catbox) drop long transfers; resume until the file is complete
+          for attempt in $(seq 1 20); do
+            curl -fL -C - --retry 5 --retry-all-errors --retry-delay 3 \
+              -o "${{ github.workspace }}/App.ipa" "$IPA_URL" && break
+            echo "Download interrupted (attempt $attempt), resuming..."
+            sleep 3
+          done
+          zip -T "${{ github.workspace }}/App.ipa"
+
+      - name: Get IPA Info
+        id: ipa_info
+        run: |
+          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
+          echo "bundle-id=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+
+      - name: Setup theos
+        uses: level3tjg/theos-action@main
+        with:
+          cache: true
+          cache-dir-theos: ${{ github.workspace }}/theos
+          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
+
+      - name: Checkout theos-jailed
+        uses: actions/checkout@v7
+        with:
+          repository: level3tjg/theos-jailed
+          path: theos-jailed
+          submodules: recursive
+
+      - name: Install theos-jailed
+        run: |
+          ./theos-jailed/install
+          cd libplist*
+          sudo make uninstall
+
+      - name: Build IPA
+        run: make package
+        env:
+          FINALPACKAGE: 1
+          SIDELOADED: 1
+          IPA: ${{ github.workspace }}/App.ipa
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package_info.outputs.id }}_${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
+          path: packages/*.ipa
+          if-no-files-found: error
+
+      - name: Create release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          files: packages/*.ipa
+          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}

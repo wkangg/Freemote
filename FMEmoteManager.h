@@ -6,10 +6,12 @@
     NSMutableDictionary *_globalEmoteNameRegistry;
 }
 @property (nonatomic, retain) FMHTTPClient *httpClient;
-@property (nonatomic, retain) NSMutableDictionary<NSString *, BTTVEmote *> *emoteRegistry;
-@property (nonatomic, retain) NSMutableDictionary<NSString *, BTTVEmote *> *emoteNameRegistry;
+// Replaced wholesale on update, so they can be read from any thread
+@property (atomic, copy) NSDictionary<NSString *, BTTVEmote *> *emoteRegistry;
+@property (atomic, copy) NSDictionary<NSString *, BTTVEmote *> *emoteNameRegistry;
 
-- (void)updateEmoteRegistry:(NSNumber *)channelID;
+// Blocks on network requests, don't call on the main thread
+- (void)updateEmoteRegistry:(NSString *)channelID;
 - (NSURL *)imageURLForBTTVEmoteID:(NSString *)emoteID;
 
 @end
