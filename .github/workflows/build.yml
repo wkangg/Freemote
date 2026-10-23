@@ -16,7 +16,7 @@ on:
 jobs:
   deb:
     if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
@@ -55,7 +55,7 @@ jobs:
 
   ipa:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
@@ -69,12 +69,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin rsync llvm xmlstarlet
-          curl -L https://github.com/libimobiledevice/libplist/releases/download/2.4.0/libplist-2.4.0.tar.bz2 | bzip2 -d | tar -x
-          cd libplist*
-          ./configure
-          sudo make install
-          sudo ldconfig
+          # theos-jailed needs plistutil from libplist >= 2.3 for the OpenStep-format Substrate
+          # Info.plist; 24.04 ships 2.3.0 (22.04's 2.2.0 fails on it and still exits 0)
+          sudo apt install -y rsync llvm xmlstarlet libplist-utils
 
       - name: Download IPA
         env:
@@ -114,14 +111,16 @@ jobs:
       - name: Install theos-jailed
         run: |
           ./theos-jailed/install
-          cd libplist*
-          sudo make uninstall
+          # Remove plistutil again so Theos leaves resource plists as XML, as before
+          sudo dpkg -r libplist-utils
 
       - name: Build IPA
         run: make package
         env:
           FINALPACKAGE: 1
           SIDELOADED: 1
+          # theos-jailed defaults to zip -9 for final packages, which is slow on a large IPA
+          COMPRESSION: 6
           IPA: ${{ github.workspace }}/App.ipa
 
       - name: Upload artifacts
