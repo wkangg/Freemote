@@ -18,10 +18,25 @@
 }
 
 - (void)loadEmotesForChannel:(NSString *)channelID {
-    if(_globalEmoteRegistry.count == 0) {
-        [self addEmoteInfo:[_httpClient bttvGlobalEmotes] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
-        [self addEmoteInfo:[_httpClient ffzGlobalEmotes] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
-        NSDictionary *sevenTVGlobalInfo = [_httpClient sevenTVGlobalEmotes];
+    // Fetch everything in parallel; chat history waits on this
+    FMHTTPClient *httpClient = _httpClient;
+    BOOL needsGlobals = _globalEmoteRegistry.count == 0;
+    __block NSDictionary *bttvGlobalInfo, *ffzGlobalInfo, *sevenTVGlobalInfo, *bttvEmoteInfo, *ffzEmoteInfo, *sevenTVEmoteInfo;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    if(needsGlobals) {
+        dispatch_group_async(group, queue, ^{ bttvGlobalInfo = [httpClient bttvGlobalEmotes]; });
+        dispatch_group_async(group, queue, ^{ ffzGlobalInfo = [httpClient ffzGlobalEmotes]; });
+        dispatch_group_async(group, queue, ^{ sevenTVGlobalInfo = [httpClient sevenTVGlobalEmotes]; });
+    }
+    dispatch_group_async(group, queue, ^{ bttvEmoteInfo = [httpClient bttvEmoteInformationForChannelID:channelID]; });
+    dispatch_group_async(group, queue, ^{ ffzEmoteInfo = [httpClient ffzEmoteInformationForChannelID:channelID]; });
+    dispatch_group_async(group, queue, ^{ sevenTVEmoteInfo = [httpClient sevenTVEmoteInformationForChannelID:channelID]; });
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+
+    if(needsGlobals) {
+        [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
+        [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
         if([sevenTVGlobalInfo isKindOfClass:[NSDictionary class]])
             [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal];
         self.globalNameRegistry = _globalEmoteNameRegistry;
@@ -32,10 +47,6 @@
     [registry addEntriesFromDictionary:_globalEmoteRegistry];
     // Channel emotes are added last so they win over globals with the same name
     NSMutableDictionary *nameRegistry = [_globalEmoteNameRegistry mutableCopy];
-
-    NSDictionary *bttvEmoteInfo = [_httpClient bttvEmoteInformationForChannelID:channelID];
-    NSDictionary *ffzEmoteInfo = [_httpClient ffzEmoteInformationForChannelID:channelID];
-    NSDictionary *sevenTVEmoteInfo = [_httpClient sevenTVEmoteInformationForChannelID:channelID];
 
     if([bttvEmoteInfo isKindOfClass:[NSDictionary class]] && bttvEmoteInfo[@"channelEmotes"]) {
         [self addEmoteInfo:bttvEmoteInfo[@"channelEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
