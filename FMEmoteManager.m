@@ -1,4 +1,5 @@
 #import "FMEmoteManager.h"
+#import "FMLog.h"
 
 @implementation FMEmoteManager
 
@@ -35,11 +36,12 @@
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     if(needsGlobals) {
-        [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
-        [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
-        if([sevenTVGlobalInfo isKindOfClass:[NSDictionary class]])
-            [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal];
+        NSUInteger bttv = [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
+        NSUInteger ffz = [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
+        NSUInteger sevenTV = [sevenTVGlobalInfo isKindOfClass:[NSDictionary class]]
+            ? [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal] : 0;
         self.globalNameRegistry = _globalEmoteNameRegistry;
+        FMLog("Global emotes: BTTV %lu, FFZ %lu, 7TV %lu", (unsigned long)bttv, (unsigned long)ffz, (unsigned long)sevenTV);
     }
 
     // Emote IDs are unique across channels and providers, so one ID registry holds everything
@@ -48,15 +50,18 @@
     // Channel emotes are added last so they win over globals with the same name
     NSMutableDictionary *nameRegistry = [_globalEmoteNameRegistry mutableCopy];
 
+    NSUInteger bttv = 0, ffz, sevenTV = 0;
     if([bttvEmoteInfo isKindOfClass:[NSDictionary class]] && bttvEmoteInfo[@"channelEmotes"]) {
-        [self addEmoteInfo:bttvEmoteInfo[@"channelEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
-        [self addEmoteInfo:bttvEmoteInfo[@"sharedEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
+        bttv += [self addEmoteInfo:bttvEmoteInfo[@"channelEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
+        bttv += [self addEmoteInfo:bttvEmoteInfo[@"sharedEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
     }
 
-    [self addEmoteInfo:ffzEmoteInfo toRegistry:registry nameRegistry:nameRegistry type:FFZ];
+    ffz = [self addEmoteInfo:ffzEmoteInfo toRegistry:registry nameRegistry:nameRegistry type:FFZ];
 
     if([sevenTVEmoteInfo isKindOfClass:[NSDictionary class]] && [sevenTVEmoteInfo[@"emote_set"] isKindOfClass:[NSDictionary class]])
-        [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
+        sevenTV = [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
+    // 0 for a provider usually means the channel has no account there (or the request failed, logged above)
+    FMLog("Channel %{public}@ emotes: BTTV %lu, FFZ %lu, 7TV %lu", channelID, (unsigned long)bttv, (unsigned long)ffz, (unsigned long)sevenTV);
 
     NSMutableDictionary *channelNameRegistries = [self.channelNameRegistries mutableCopy];
     channelNameRegistries[channelID] = nameRegistry;
@@ -74,10 +79,13 @@
     return (channelID ? self.channelNameRegistries[channelID] : nil) ?: self.globalNameRegistry;
 }
 
-- (void)addEmoteInfo:(id)emoteInfo toRegistry:(NSMutableDictionary *)registry nameRegistry:(NSMutableDictionary *)nameRegistry type:(EmoteType)type {
+// Returns how many emotes were added
+- (NSUInteger)addEmoteInfo:(id)emoteInfo toRegistry:(NSMutableDictionary *)registry nameRegistry:(NSMutableDictionary *)nameRegistry type:(EmoteType)type {
     // Error responses (e.g. unknown channel) are dictionaries rather than arrays
     if(![emoteInfo isKindOfClass:[NSArray class]])
-        return;
+        return 0;
+
+    NSUInteger count = 0;
 
     for(NSDictionary *emoteDict in emoteInfo) {
         if(![emoteDict isKindOfClass:[NSDictionary class]])
@@ -87,7 +95,9 @@
             continue;
         [registry setObject:emote forKey:emote.emoteID];
         [nameRegistry setObject:emote forKey:emote.emoteText];
+        count++;
     }
+    return count;
 }
 
 - (NSURL *)imageURLForBTTVEmoteID:(NSString *)emoteID {

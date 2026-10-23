@@ -15,6 +15,8 @@
 @interface KMPMCChatMessageInfo : NSObject
 @property (readonly) NSArray *tokens;
 @property (readonly) NSDictionary *messageTags;
+@property (readonly) NSString *messageType;
+@property (readonly) id sourceInfo; // shared chat only
 @end
 
 @interface KMPMCChatLiveMessage : NSObject

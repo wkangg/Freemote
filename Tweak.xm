@@ -1,11 +1,8 @@
 #import "Tweak.h"
 #import "FMEmoteManager.h"
+#import "FMLog.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <os/log.h>
-
-// NSLog redacts arguments as <private> on device
-#define FMLog(fmt, ...) os_log(OS_LOG_DEFAULT, "[Freemote] " fmt, ##__VA_ARGS__)
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"
@@ -84,7 +81,10 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
         return url;
 
     NSString *emoteID = [path substringFromIndex:NSMaxRange(prefixRange)].pathComponents.firstObject;
-    return [emoteManager imageURLForBTTVEmoteID:emoteID] ?: url;
+    NSURL *imageURL = [emoteManager imageURLForBTTVEmoteID:emoteID];
+    if(!imageURL)
+        FMLogFirst(10, "No image for emote %{public}@ (%{public}@)", emoteID, url);
+    return imageURL ?: url;
 }
 
 static BOOL isChannelID(NSString *channelID) {
@@ -95,8 +95,9 @@ static BOOL isChannelID(NSString *channelID) {
 static void loadChannelEmotes(NSString *channelID, dispatch_block_t completion) {
     dispatch_async(emoteQueue, ^{
         if(![emoteManager hasEmotesForChannel:channelID]) {
+            NSDate *start = [NSDate date];
             [emoteManager loadEmotesForChannel:channelID];
-            FMLog("Loaded %lu emotes for channel %{public}@", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID);
+            FMLog("Loaded %lu emotes for channel %{public}@ in %.1fs", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID, -start.timeIntervalSinceNow);
         }
         if(completion)
             completion();
@@ -105,6 +106,7 @@ static void loadChannelEmotes(NSString *channelID, dispatch_block_t completion) 
 
 static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
+        FMLog("Chat history for channel %{public}@ is waiting for its emotes", channelID);
         dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
         loadChannelEmotes(channelID, ^{
             dispatch_semaphore_signal(loaded);
@@ -130,6 +132,7 @@ static BOOL isChatHistoryRequest(NSURLRequest *request) {
         if(![operation isKindOfClass:[NSDictionary class]] || ![chatHistoryOperations containsObject:operation[@"operationName"]])
             continue;
         isChatHistory = YES;
+        FMLog("Holding back %{public}@ response to add emotes", operation[@"operationName"]);
 
         // Start on the emotes now so the response doesn't have to wait as long
         NSDictionary *variables = operation[@"variables"];
@@ -139,7 +142,7 @@ static BOOL isChatHistoryRequest(NSURLRequest *request) {
     return isChatHistory;
 }
 
-static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
+static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
     NSMutableArray *newFragments = [[NSMutableArray alloc] init];
     for(NSDictionary *fragment in fragments) {
         // Plain text fragments have no content
@@ -153,6 +156,7 @@ static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *
             [newFragments addObject:@{@"__typename": @"MessageFragment", @"text": text, @"content": [NSNull null]}];
         }, ^(NSString *name, NSString *emoteID) {
             [newFragments addObject:@{@"__typename": @"MessageFragment", @"text": name, @"content": @{@"__typename": @"Emote", @"emoteID": emoteID, @"setID": @"", @"token": name}}];
+            (*emoteCount)++;
         });
         if(!foundEmote)
             [newFragments addObject:fragment];
@@ -172,16 +176,27 @@ static void addEmotesToChatHistory(id json) {
 
     NSArray *messages = json[@"recentChatMessages"];
     if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
+        NSDate *start = [NSDate date];
         NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForChannelEmotes(json[@"id"]);
+        NSTimeInterval waited = -start.timeIntervalSinceNow;
+        NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
-            if(![content isKindOfClass:[NSMutableDictionary class]])
-                continue;
-            for(NSString *key in @[@"contentFragments", @"messageFragments"]) {
-                if([content[key] isKindOfClass:[NSArray class]])
-                    content[key] = addEmotesToFragments(content[key], nameRegistry);
+            BOOL hasFragments = NO;
+            if([content isKindOfClass:[NSMutableDictionary class]]) {
+                for(NSString *key in @[@"contentFragments", @"messageFragments"]) {
+                    if([content[key] isKindOfClass:[NSArray class]]) {
+                        content[key] = addEmotesToFragments(content[key], nameRegistry, &emoteCount);
+                        hasFragments = YES;
+                    }
+                }
             }
+            if(!hasFragments)
+                withoutFragments++;
         }
+        // Many messages without fragments means the response shape changed
+        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, waited %.1fs)",
+              json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, waited);
         return;
     }
 
@@ -190,11 +205,17 @@ static void addEmotesToChatHistory(id json) {
 }
 
 static NSData *chatHistoryDataWithEmotes(NSData *data) {
-    id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
-    if(!json)
+    NSError *error;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
+    if(!json) {
+        FMLog("Chat history isn't JSON (%lu bytes), left as is: %{public}@", (unsigned long)data.length, error.localizedDescription);
         return data;
+    }
     addEmotesToChatHistory(json);
-    return [NSJSONSerialization dataWithJSONObject:json options:0 error:nil] ?: data;
+    NSData *newData = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
+    if(!newData)
+        FMLog("Couldn't serialize chat history, left as is: %{public}@", error.localizedDescription);
+    return newData ?: data;
 }
 
 static char chatHistoryBufferKey;
@@ -225,6 +246,8 @@ static NSMutableData *chatHistoryBuffer(NSURLSessionTask *task) {
     NSMutableData *buffer = chatHistoryBuffer(task);
     if(buffer && [task isKindOfClass:[NSURLSessionDataTask class]]) {
         objc_setAssociatedObject(task, &chatHistoryBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if(error)
+            FMLog("Chat history request failed, left as is: %{public}@", error.localizedDescription);
         NSData *data = error ? buffer : chatHistoryDataWithEmotes(buffer);
         if(data.length)
             [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
@@ -246,6 +269,44 @@ static NSString *channelKey(NSString *channelName) {
     return [channelName isKindOfClass:[NSString class]] ? [channelName.lowercaseString stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"#"]] : nil;
 }
 
+// Logs each kind of chat event the first time it shows up: messages that arrive through an event type
+// other than MessagesReceived aren't tagged with a channel
+static void logChatEventType(id event, NSString *channelName) {
+    static NSMutableSet<NSString *> *seenTypes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        seenTypes = [[NSMutableSet alloc] init];
+    });
+
+    NSString *type = event ? NSStringFromClass([event class]) : @"nil";
+    @synchronized(seenTypes) {
+        if([seenTypes containsObject:type])
+            return;
+        [seenTypes addObject:type];
+    }
+    FMLog("First chat event %{public}@ (chat %{public}@)", type, channelName);
+}
+
+// For figuring out where an untagged message came from
+static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray *tokens) {
+    NSMutableString *text = [[NSMutableString alloc] init];
+    for(id token in tokens) {
+        if([token isKindOfClass:TextToken])
+            [text appendString:((KMPMCMessageTokenTextToken *)token).text ?: @""];
+        else
+            [text appendFormat:@"[%@]", NSStringFromClass([token class])];
+    }
+    if(text.length > 80)
+        [text replaceCharactersInRange:NSMakeRange(80, text.length - 80) withString:@"..."];
+
+    NSString *type = [messageInfo respondsToSelector:@selector(messageType)] ? messageInfo.messageType : nil;
+    BOOL sharedChat = [messageInfo respondsToSelector:@selector(sourceInfo)] && messageInfo.sourceInfo;
+    NSDictionary *tags = messageInfo.messageTags;
+    NSArray *tagNames = [tags isKindOfClass:[NSDictionary class]] ? tags.allKeys : nil;
+    return [NSString stringWithFormat:@"id %@, type %@, shared chat %@, tags [%@], text \"%@\"",
+            chatMessageID(messageInfo), type, sharedChat ? @"yes" : @"no", [tagNames componentsJoinedByString:@","], text];
+}
+
 %group KMP
 
 %hook KMPMCChatEvent
@@ -253,18 +314,18 @@ static NSString *channelKey(NSString *channelName) {
 // Swift reads the event to get at its messages, so tag them with this event's channel on the way
 - (id)event {
     id event = %orig;
+    logChatEventType(event, self.channelName);
     if(![event isKindOfClass:MessagesReceived])
         return event;
 
     NSString *channelName = channelKey(self.channelName), *channelID;
+    NSArray *joinedNames;
     @synchronized(channelIDsByName) {
         channelID = channelName ? channelIDsByName[channelName] : nil;
+        joinedNames = channelID ? nil : channelIDsByName.allKeys;
     }
     if(!channelID) {
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            FMLog("No channel ID for chat %{public}@", channelName);
-        });
+        FMLogFirst(5, "No channel ID for chat %{public}@ (joined: %{public}@)", channelName, [joinedNames componentsJoinedByString:@", "]);
         return event;
     }
 
@@ -286,12 +347,8 @@ static NSString *channelKey(NSString *channelName) {
     // Several channels' chats can be joined at once (e.g. your own in the background), so use the message's channel
     NSString *messageID = chatMessageID(self);
     NSString *channelID = messageID ? [channelIDsByMessageID objectForKey:messageID] : nil;
-    if(!channelID) {
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            FMLog("Message has no known channel, using global emotes");
-        });
-    }
+    if(!channelID)
+        FMLogFirst(10, "Message has no known channel, using global emotes: %{public}@", describeChatMessage(self, tokens));
 
     return substituteBTTVStringsWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
 }
