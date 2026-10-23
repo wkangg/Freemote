@@ -21,6 +21,9 @@ static NSMutableDictionary<NSString *, NSString *> *channelIDsByName; // @synchr
 static NSCache<NSString *, NSString *> *channelIDsByMessageID;
 // VOD chat doesn't say whose video it is either, so that's looked up
 static NSCache<NSString *, NSString *> *channelIDsByVideoID;
+// Your own messages show up before the server gives them an ID, so they're found by the nonce they were sent with
+static NSCache<NSString *, NSString *> *channelIDsByNonce;
+static NSString *lastSentChannelID; // @synchronized(channelIDsByName)
 
 // Zero-width and blank characters that chat clients add to get around Twitch's duplicate message check
 static BOOL isInvisibleCharacter(UTF32Char c) {
@@ -642,6 +645,23 @@ static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray 
             chatMessageID(messageInfo), type, sharedChat ? @"yes" : @"no", [tagNames componentsJoinedByString:@","], text];
 }
 
+// Your own message, before the server echoes it back with an ID: it only has the client-nonce tag it was sent with
+static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
+    NSDictionary *tags = messageInfo.messageTags;
+    NSString *nonce = [tags isKindOfClass:[NSDictionary class]] ? tags[@"client-nonce"] : nil;
+    if(![nonce isKindOfClass:[NSString class]])
+        return nil;
+    NSString *channelID = [channelIDsByNonce objectForKey:nonce];
+    if(channelID)
+        return channelID;
+    // The app made up the nonce itself: it's most likely from the chat you last sent to
+    @synchronized(channelIDsByName) {
+        channelID = lastSentChannelID;
+    }
+    FMLogFirst(5, "Sent message's nonce %{public}@ is unknown, using the last chat sent to (%{public}@)", nonce, channelID);
+    return channelID;
+}
+
 %group KMP
 
 %hook KMPMCChatEvent
@@ -683,6 +703,8 @@ static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray 
     NSString *messageID = chatMessageID(self);
     NSString *channelID = messageID ? [channelIDsByMessageID objectForKey:messageID] : nil;
     if(!channelID)
+        channelID = sentMessageChannelID(self);
+    if(!channelID)
         FMLogFirst(10, "Message has no known channel, using global emotes: %{public}@", describeChatMessage(self, tokens));
 
     return substituteBTTVStringsWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
@@ -711,6 +733,27 @@ static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray 
 
 %end
 
+%group KMPSend
+
+%hook ChatConnectionManager
+
+- (id)sendMessageChannelName:(NSString *)channelName message:(NSString *)message reply:(id)reply clientNonce:(NSString *)clientNonce {
+    NSString *key = channelKey(channelName), *channelID;
+    @synchronized(channelIDsByName) {
+        channelID = key ? channelIDsByName[key] : nil;
+        if(channelID)
+            lastSentChannelID = channelID;
+    }
+    if(channelID && [clientNonce isKindOfClass:[NSString class]])
+        [channelIDsByNonce setObject:channelID forKey:clientNonce];
+    FMLogFirst(5, "Sending a message to chat %{public}@ (%{public}@, nonce %{public}@)", key, channelID, clientNonce);
+    return %orig;
+}
+
+%end
+
+%end
+
 %group KMPFactory
 
 %hook KMPMCChatConnectionManagerFactory
@@ -727,6 +770,12 @@ static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray 
             FMLog("Hooked chat joins");
         } else {
             FMLog("KMPMobileChat API changed, not hooking chat joins");
+        }
+        if(class_getInstanceMethod(managerClass, @selector(sendMessageChannelName:message:reply:clientNonce:))) {
+            %init(KMPSend, ChatConnectionManager = managerClass);
+            FMLog("Hooked sent messages");
+        } else {
+            FMLog("KMPMobileChat API changed, not hooking sent messages");
         }
     });
     return manager;
@@ -841,5 +890,7 @@ static void joinedChannel(id channelID) {
     channelIDsByMessageID = [[NSCache alloc] init];
     channelIDsByMessageID.countLimit = 5000;
     channelIDsByVideoID = [[NSCache alloc] init];
+    channelIDsByNonce = [[NSCache alloc] init];
+    channelIDsByNonce.countLimit = 100;
     %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"));
 }
