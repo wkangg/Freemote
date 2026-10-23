@@ -344,23 +344,20 @@ static NSString *channelKey(NSString *channelName) {
 
 %end
 
-// Kotlin/Native adds a class's ObjC methods in its +initialize. The factory is used before any channel
-// is joined, so it's hooked right then; returns whether it was.
-static BOOL hookFactoryIfReady(Class cls) {
-    static BOOL hooked;
-    if(hooked || cls != objc_getClass("KMPMCChatConnectionManagerFactory")
-       || !class_getInstanceMethod(cls, @selector(iosCreateSocketFactory:logger:userEmoteSetsRepository:bitsConfigRepository:chatModeratorActionsRepository:messageBatchingConfig:channelSettingsRepository:eventLogger:experimentHelper:sendChatMessageApi:pageLoadTimeProvider:)))
-        return hooked;
-    hooked = YES;
-    %init(KMPFactory);
-    return YES;
-}
-
+// Kotlin/Native adds a class's ObjC methods in its +initialize, and the factory is used before any channel
+// is joined, so it's hooked right then. Don't look its methods up any earlier: the method resolver runs
+// +initialize, i.e. this hook, from inside the lookup.
 %hook KMPMCBase
 
 + (void)initialize {
     %orig;
-    hookFactoryIfReady(self);
+    if(self != objc_getClass("KMPMCChatConnectionManagerFactory"))
+        return;
+    if(class_getInstanceMethod(self, @selector(iosCreateSocketFactory:logger:userEmoteSetsRepository:bitsConfigRepository:chatModeratorActionsRepository:messageBatchingConfig:channelSettingsRepository:eventLogger:experimentHelper:sendChatMessageApi:pageLoadTimeProvider:))) {
+        %init(KMPFactory);
+    } else {
+        FMLog("KMPMobileChat API changed, not hooking chat joins");
+    }
 }
 
 %end
@@ -452,7 +449,4 @@ static void joinedChannel(id channelID) {
     channelIDsByMessageID = [[NSCache alloc] init];
     channelIDsByMessageID.countLimit = 5000;
     %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"));
-    // In case the Kotlin runtime was already set up before the tweak loaded
-    if(!hookFactoryIfReady(objc_getClass("KMPMCChatConnectionManagerFactory")))
-        FMLog("Waiting for KMPMobileChat to hook chat joins");
 }
