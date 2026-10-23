@@ -8,7 +8,8 @@
     if(self) {
         _httpClient = [[FMHTTPClient alloc] init];
         _emoteRegistry = @{};
-        _emoteNameRegistry = @{};
+        _channelNameRegistries = @{};
+        _globalNameRegistry = @{};
         _globalEmoteRegistry = [[NSMutableDictionary alloc] init];
         _globalEmoteNameRegistry = [[NSMutableDictionary alloc] init];
     }
@@ -16,17 +17,20 @@
     return self;
 }
 
-- (void)updateEmoteRegistry:(NSString *)channelID {
+- (void)loadEmotesForChannel:(NSString *)channelID {
     if(_globalEmoteRegistry.count == 0) {
         [self addEmoteInfo:[_httpClient bttvGlobalEmotes] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
         [self addEmoteInfo:[_httpClient ffzGlobalEmotes] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
         NSDictionary *sevenTVGlobalInfo = [_httpClient sevenTVGlobalEmotes];
         if([sevenTVGlobalInfo isKindOfClass:[NSDictionary class]])
             [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal];
+        self.globalNameRegistry = _globalEmoteNameRegistry;
     }
 
+    // Emote IDs are unique across channels and providers, so one ID registry holds everything
+    NSMutableDictionary *registry = [self.emoteRegistry mutableCopy];
+    [registry addEntriesFromDictionary:_globalEmoteRegistry];
     // Channel emotes are added last so they win over globals with the same name
-    NSMutableDictionary *registry = [_globalEmoteRegistry mutableCopy];
     NSMutableDictionary *nameRegistry = [_globalEmoteNameRegistry mutableCopy];
 
     NSDictionary *bttvEmoteInfo = [_httpClient bttvEmoteInformationForChannelID:channelID];
@@ -43,8 +47,21 @@
     if([sevenTVEmoteInfo isKindOfClass:[NSDictionary class]] && [sevenTVEmoteInfo[@"emote_set"] isKindOfClass:[NSDictionary class]])
         [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
 
+    NSMutableDictionary *channelNameRegistries = [self.channelNameRegistries mutableCopy];
+    channelNameRegistries[channelID] = nameRegistry;
+
+    // ID registry first: a message can only use a name once its image URL resolves
     self.emoteRegistry = registry;
-    self.emoteNameRegistry = nameRegistry;
+    self.channelNameRegistries = channelNameRegistries;
+    self.lastLoadedChannelID = channelID;
+}
+
+- (BOOL)hasEmotesForChannel:(NSString *)channelID {
+    return self.channelNameRegistries[channelID] != nil;
+}
+
+- (NSDictionary<NSString *, BTTVEmote *> *)emoteNameRegistryForChannel:(NSString *)channelID {
+    return (channelID ? self.channelNameRegistries[channelID] : nil) ?: self.globalNameRegistry;
 }
 
 - (void)addEmoteInfo:(id)emoteInfo toRegistry:(NSMutableDictionary *)registry nameRegistry:(NSMutableDictionary *)nameRegistry type:(EmoteType)type {

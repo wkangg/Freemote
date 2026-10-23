@@ -13,4 +13,5 @@
 
 @interface KMPMCChatMessageInfo : NSObject
 @property (readonly) NSArray *tokens;
+@property (readonly) NSDictionary *messageTags;
 @end

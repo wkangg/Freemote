@@ -1,6 +1,10 @@
 #import "Tweak.h"
 #import "FMEmoteManager.h"
 #import <objc/runtime.h>
+#import <os/log.h>
+
+// NSLog redacts arguments as <private> on device
+#define FMLog(fmt, ...) os_log(OS_LOG_DEFAULT, "[Freemote] " fmt, ##__VA_ARGS__)
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"
@@ -8,10 +12,8 @@
 static Class EmoteToken, TextToken;
 static FMEmoteManager *emoteManager;
 static dispatch_queue_t emoteQueue;
-static NSString *currentChannelID; // only touched on emoteQueue
 
-static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens) {
-    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = emoteManager.emoteNameRegistry;
+static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
     if(nameRegistry.count == 0)
         return tokens;
 
@@ -72,7 +74,18 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
 
 - (NSArray *)tokens {
     NSArray *tokens = %orig;
-    return substituteBTTVStringsWithEmoteTokens(tokens);
+
+    // Several channels' chats can be joined at once (e.g. your own in the background), so use the message's room
+    NSString *roomID = self.messageTags[@"room-id"];
+    if(![roomID isKindOfClass:[NSString class]]) {
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            FMLog("Message has no room-id tag, using the last loaded channel");
+        });
+        roomID = emoteManager.lastLoadedChannelID;
+    }
+
+    return substituteBTTVStringsWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:roomID]);
 }
 
 %end
@@ -92,12 +105,13 @@ static void hookKMPIfNeeded(void) {
         [EmoteToken class];
 
         if(class_getInstanceMethod(messageInfo, @selector(tokens))
+           && class_getInstanceMethod(messageInfo, @selector(messageTags))
            && class_getInstanceMethod(TextToken, @selector(initWithText:flags:))
            && class_getInstanceMethod(EmoteToken, @selector(initWithText:id:))) {
             %init(KMP);
-            NSLog(@"[Freemote] Hooked chat messages");
+            FMLog("Hooked chat messages");
         } else {
-            NSLog(@"[Freemote] KMPMobileChat API changed, not hooking chat messages");
+            FMLog("KMPMobileChat API changed, not hooking chat messages");
         }
     });
 }
@@ -106,16 +120,15 @@ static void joinedChannel(id channelID) {
     hookKMPIfNeeded();
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
-    NSLog(@"[Freemote] Joined channel %@", channel);
+    FMLog("Joined channel %{public}@", channel);
     if(channel.length == 0 || [channel rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location != NSNotFound)
         return;
 
     dispatch_async(emoteQueue, ^{
-        if([channel isEqualToString:currentChannelID])
+        if([emoteManager hasEmotesForChannel:channel])
             return;
-        currentChannelID = channel;
-        [emoteManager updateEmoteRegistry:channel];
-        NSLog(@"[Freemote] Loaded %lu emotes for channel %@", (unsigned long)emoteManager.emoteNameRegistry.count, channel);
+        [emoteManager loadEmotesForChannel:channel];
+        FMLog("Loaded %lu emotes for channel %{public}@", (unsigned long)[emoteManager emoteNameRegistryForChannel:channel].count, channel);
     });
 }
 
