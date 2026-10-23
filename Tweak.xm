@@ -1,3 +1,4 @@
+#import <UIKit/UIKit.h>
 #import "Tweak.h"
 #import "FMEmoteManager.h"
 #import "FMLog.h"
@@ -223,14 +224,19 @@ static NSDictionary<NSString *, BTTVEmote *> *waitForVideoEmotes(NSString *video
 // Chat history (ChatHistory, TheaterPortalPreload) and VOD chat (VideoCommentsBy*) come from GQL instead of KMPMobileChat
 static NSSet<NSString *> *chatHistoryOperations;
 
-// The variables of each chat history operation in the request
-static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL log) {
+// The GQL operations in a request: its body is one operation or a batch of them
+static NSArray *gqlOperations(NSURLRequest *request) {
     if(![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody)
         return @[];
 
     id json = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+    return [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}];
+}
+
+// The variables of each chat history operation in the request
+static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL log) {
     NSMutableArray *variablesList = [[NSMutableArray alloc] init];
-    for(NSDictionary *operation in [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}]) {
+    for(NSDictionary *operation in gqlOperations(request)) {
         if(![operation isKindOfClass:[NSDictionary class]] || ![chatHistoryOperations containsObject:operation[@"operationName"]])
             continue;
         if(log)
@@ -396,14 +402,136 @@ static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote
         addEmotesToVideoComments(value, nameRegistry, emoteCount, commentCount);
 }
 
-static NSData *chatHistoryDataWithEmotes(NSData *data, NSURLRequest *request) {
+#pragma mark - Emote cards
+
+// The emote whose card is open, if it's one of ours. Main thread only.
+static BTTVEmote *emoteCardEmote;
+
+// Our emote that an EmoteCard operation asks for, or nil
+static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
+    if(![operation isKindOfClass:[NSDictionary class]] || ![@"EmoteCard" isEqual:operation[@"operationName"]])
+        return nil;
+    NSDictionary *variables = operation[@"variables"];
+    NSString *emoteID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"emoteID"] : nil;
+    if(![emoteID isKindOfClass:[NSString class]] || ![emoteID hasPrefix:FMEmoteIDPrefix])
+        return nil;
+    BTTVEmote *emote = emoteManager.emoteRegistry[[emoteID substringFromIndex:FMEmoteIDPrefix.length]];
+    if(!emote)
+        FMLogFirst(10, "Emote card for unknown emote %{public}@", emoteID);
+    return emote;
+}
+
+// Whether the request is an emote card for one of our emotes. Every emote card request switches which card is open.
+static BOOL isEmoteCardRequest(NSURLRequest *request) {
+    BOOL isEmoteCard = NO;
+    BTTVEmote *emote;
+    for(NSDictionary *operation in gqlOperations(request)) {
+        if([operation isKindOfClass:[NSDictionary class]] && [@"EmoteCard" isEqual:operation[@"operationName"]]) {
+            isEmoteCard = YES;
+            emote = emoteCardEmoteFor(operation);
+        }
+    }
+    if(!isEmoteCard)
+        return NO;
+
+    if(emote)
+        FMLog("Holding back the emote card for %{public}@ (%{public}@)", emote.emoteText, emote.emoteID);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        emoteCardEmote = emote;
+    });
+    return emote != nil;
+}
+
+// Twitch doesn't know our emotes, so their cards get a made-up emote instead: a global one with no owner, which the
+// card shows with just the image and name. The image goes through the URL rewrite like in chat.
+static void addEmoteCards(id json, NSURLRequest *request) {
+    NSArray *operations = gqlOperations(request);
+    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
+    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
+        BTTVEmote *emote = emoteCardEmoteFor(operations[i]);
+        NSMutableDictionary *response = responses[i];
+        if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
+            continue;
+        response[@"data"] = @{@"emote": @{
+            @"__typename": @"Emote", @"id": [FMEmoteIDPrefix stringByAppendingString:emote.emoteID], @"token": emote.emoteText, @"setID": @"",
+            @"type": @"GLOBALS", @"owner": [NSNull null], @"subscriptionProduct": [NSNull null], @"bitsBadgeTierSummary": [NSNull null]
+        }};
+        [response removeObjectForKey:@"errors"];
+        FMLog("Answered the emote card for %{public}@", emote.emoteText);
+    }
+}
+
+static id swiftIvar(id object, const char *name) {
+    Ivar ivar = class_getInstanceVariable([object class], name);
+    return ivar ? object_getIvar(object, ivar) : nil;
+}
+
+static char emoteCardLinkKey;
+
+// The made-up card says "Twitch Global Emote": say where the emote is really from, and link to its page
+static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
+    // Lazy Swift properties: nil until the card first uses them
+    UITextView *titleTextView = swiftIvar(titleView, "$__lazy_storage_$_titleTextView");
+    UILabel *subtitleLabel = swiftIvar(titleView, "$__lazy_storage_$_subtitleLabel");
+    UIStackView *labelsStackView = swiftIvar(titleView, "$__lazy_storage_$_labelsStackView");
+    if(![titleTextView isKindOfClass:[UITextView class]] || ![subtitleLabel isKindOfClass:[UILabel class]] || ![labelsStackView isKindOfClass:[UIStackView class]])
+        return;
+    // A Twitch emote's card that opened before its request went out
+    if([titleTextView.text rangeOfString:emote.emoteText].location == NSNotFound)
+        return;
+
+    NSString *description = [emote emoteDescription];
+    if(![subtitleLabel.text isEqualToString:description]) {
+        subtitleLabel.text = description;
+        subtitleLabel.hidden = NO;
+    }
+
+    if(!emote.pageURL || objc_getAssociatedObject(titleView, &emoteCardLinkKey))
+        return;
+    // A text view opens its links when tapped, like a link in chat
+    NSURL *pageURL = emote.pageURL;
+    NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+    paragraphStyle.alignment = subtitleLabel.textAlignment;
+    UITextView *link = [[UITextView alloc] init];
+    link.attributedText = [[NSAttributedString alloc] initWithString:[pageURL.host stringByAppendingString:pageURL.path] attributes:@{
+        NSLinkAttributeName: pageURL, NSFontAttributeName: subtitleLabel.font, NSParagraphStyleAttributeName: paragraphStyle
+    }];
+    // Twitch's link purple
+    link.linkTextAttributes = @{NSForegroundColorAttributeName: [UIColor colorWithRed:0xA9 / 255.0 green:0x70 / 255.0 blue:0xFF / 255.0 alpha:1]};
+    link.editable = NO;
+    link.scrollEnabled = NO;
+    link.backgroundColor = [UIColor clearColor];
+    link.textContainerInset = UIEdgeInsetsZero;
+    link.textContainer.lineFragmentPadding = 0;
+    link.textContainer.maximumNumberOfLines = 1;
+    link.textContainer.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [labelsStackView addArrangedSubview:link];
+    objc_setAssociatedObject(titleView, &emoteCardLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    FMLog("Added details to the emote card for %{public}@", emote.emoteText);
+}
+
+%hook EmoteCardTitleView
+
+// The card fills in its labels after the view is created, so check whenever it lays out
+- (void)layoutSubviews {
+    %orig;
+    if(emoteCardEmote)
+        updateEmoteCardTitle((UIView *)self, emoteCardEmote);
+}
+
+%end
+
+#pragma mark - Held back responses
+
+static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request) {
     NSError *error;
     id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
     if(!json) {
-        FMLog("Chat history isn't JSON (%lu bytes), left as is: %{public}@", (unsigned long)data.length, error.localizedDescription);
+        FMLog("Held back response isn't JSON (%lu bytes), left as is: %{public}@", (unsigned long)data.length, error.localizedDescription);
         return data;
     }
     addEmotesToChatHistory(json);
+    addEmoteCards(json, request);
 
     NSString *videoID = chatHistoryVideoID(request);
     if(videoID) {
@@ -418,18 +546,21 @@ static NSData *chatHistoryDataWithEmotes(NSData *data, NSURLRequest *request) {
 
     NSData *newData = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
     if(!newData)
-        FMLog("Couldn't serialize chat history, left as is: %{public}@", error.localizedDescription);
+        FMLog("Couldn't serialize held back response, left as is: %{public}@", error.localizedDescription);
     return newData ?: data;
 }
 
-static char chatHistoryBufferKey;
+static char heldResponseBufferKey;
 
-// The response buffer for a chat history task, or nil for any other task
-static NSMutableData *chatHistoryBuffer(NSURLSessionTask *task) {
-    id buffer = objc_getAssociatedObject(task, &chatHistoryBufferKey);
+// The response buffer for a chat history or emote card task, or nil for any other task
+static NSMutableData *heldResponseBuffer(NSURLSessionTask *task) {
+    id buffer = objc_getAssociatedObject(task, &heldResponseBufferKey);
     if(!buffer) {
-        buffer = isChatHistoryRequest(task.originalRequest) ? [[NSMutableData alloc] init] : [NSNull null];
-        objc_setAssociatedObject(task, &chatHistoryBufferKey, buffer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Both checks have to run: they start loading emotes and track which emote card is open
+        BOOL hold = isChatHistoryRequest(task.originalRequest);
+        hold = isEmoteCardRequest(task.originalRequest) || hold;
+        buffer = hold ? [[NSMutableData alloc] init] : [NSNull null];
+        objc_setAssociatedObject(task, &heldResponseBufferKey, buffer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     return [buffer isKindOfClass:[NSMutableData class]] ? buffer : nil;
 }
@@ -439,7 +570,7 @@ static NSMutableData *chatHistoryBuffer(NSURLSessionTask *task) {
 %hook ApolloURLSessionClient
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
-    NSMutableData *buffer = chatHistoryBuffer(dataTask);
+    NSMutableData *buffer = heldResponseBuffer(dataTask);
     if(buffer)
         [buffer appendData:data];
     else
@@ -447,12 +578,12 @@ static NSMutableData *chatHistoryBuffer(NSURLSessionTask *task) {
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    NSMutableData *buffer = chatHistoryBuffer(task);
+    NSMutableData *buffer = heldResponseBuffer(task);
     if(buffer && [task isKindOfClass:[NSURLSessionDataTask class]]) {
-        objc_setAssociatedObject(task, &chatHistoryBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if(error)
-            FMLog("Chat history request failed, left as is: %{public}@", error.localizedDescription);
-        NSData *data = error ? buffer : chatHistoryDataWithEmotes(buffer, task.originalRequest);
+            FMLog("Held back request failed, left as is: %{public}@", error.localizedDescription);
+        NSData *data = error ? buffer : responseDataWithEmotes(buffer, task.originalRequest);
         if(data.length)
             [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
     }
@@ -710,5 +841,5 @@ static void joinedChannel(id channelID) {
     channelIDsByMessageID = [[NSCache alloc] init];
     channelIDsByMessageID.countLimit = 5000;
     channelIDsByVideoID = [[NSCache alloc] init];
-    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"));
+    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"));
 }
