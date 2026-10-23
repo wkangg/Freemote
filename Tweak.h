@@ -48,3 +48,7 @@
 @interface SRWebSocket : NSObject
 @property (readonly) NSURL *url;
 @end
+
+// React Native's fetch: the NSURLSession delegate for its requests
+@interface RCTHTTPRequestHandler : NSObject <NSURLSessionDataDelegate>
+@end
