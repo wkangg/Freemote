@@ -7,6 +7,9 @@
 
     if(self) {
         _emoteType = type;
+
+        if(type == SevenTV || type == SevenTVGlobal)
+            return [self loadSevenTVData:data] ? self : nil;
         
         if(data[@"code"])
             _emoteText = data[@"code"];
@@ -36,6 +39,26 @@
     }
 
     return self;
+}
+
+// 7TV emote set entry: {id, name (the alias used in this set), data: {animated, ...}}
+- (BOOL)loadSevenTVData:(NSDictionary *)data {
+    NSString *emoteID = data[@"id"];
+    NSString *name = data[@"name"];
+    NSDictionary *emoteData = data[@"data"];
+    if(![emoteID isKindOfClass:[NSString class]] || ![name isKindOfClass:[NSString class]])
+        return NO;
+
+    _emoteText = name;
+    // Suffixed like FFZ IDs so they can't collide with other providers
+    _emoteID = [emoteID stringByAppendingString:@"7tv"];
+    _isAnimated = [emoteData isKindOfClass:[NSDictionary class]] && [emoteData[@"animated"] boolValue];
+
+    // 7TV serves webp/avif plus gif (animated) or png (static); the app can only decode the latter
+    NSString *extension = _isAnimated ? @"gif" : @"png";
+    _image1x = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.%@", emoteID, extension]];
+    _image2x = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/2x.%@", emoteID, extension]];
+    return YES;
 }
 
 @end

@@ -1,7 +1,7 @@
 #import <Foundation/Foundation.h>
 
 typedef enum {
-    BTTV, FFZ, BTTVGlobal, FFZGlobal
+    BTTV, FFZ, BTTVGlobal, FFZGlobal, SevenTV, SevenTVGlobal
 } EmoteType;
 
 @interface BTTVEmote : NSObject
