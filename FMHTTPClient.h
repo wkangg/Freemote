@@ -7,4 +7,6 @@
 - (NSDictionary *)bttvGlobalEmotes;
 - (NSDictionary *)ffzGlobalEmotes;
 - (NSDictionary *)sevenTVGlobalEmotes;
+// The channel ID of a VOD's streamer, or nil
+- (NSString *)ownerIDForVideoID:(NSString *)videoID;
 @end

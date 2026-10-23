@@ -18,6 +18,8 @@ static dispatch_queue_t emoteQueue;
 // channel event they arrived in, and that event's channel name from the join call
 static NSMutableDictionary<NSString *, NSString *> *channelIDsByName; // @synchronized
 static NSCache<NSString *, NSString *> *channelIDsByMessageID;
+// VOD chat doesn't say whose video it is either, so that's looked up
+static NSCache<NSString *, NSString *> *channelIDsByVideoID;
 
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise
 static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
@@ -92,13 +94,34 @@ static BOOL isChannelID(NSString *channelID) {
         && [channelID rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location == NSNotFound;
 }
 
+// Only on emoteQueue
+static void loadChannelEmotesNow(NSString *channelID) {
+    if([emoteManager hasEmotesForChannel:channelID])
+        return;
+    NSDate *start = [NSDate date];
+    [emoteManager loadEmotesForChannel:channelID];
+    FMLog("Loaded %lu emotes for channel %{public}@ in %.1fs", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID, -start.timeIntervalSinceNow);
+}
+
 static void loadChannelEmotes(NSString *channelID, dispatch_block_t completion) {
     dispatch_async(emoteQueue, ^{
-        if(![emoteManager hasEmotesForChannel:channelID]) {
-            NSDate *start = [NSDate date];
-            [emoteManager loadEmotesForChannel:channelID];
-            FMLog("Loaded %lu emotes for channel %{public}@ in %.1fs", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID, -start.timeIntervalSinceNow);
+        loadChannelEmotesNow(channelID);
+        if(completion)
+            completion();
+    });
+}
+
+// Looks up the video's channel, then loads its emotes
+static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
+    dispatch_async(emoteQueue, ^{
+        NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
+        if(!channelID) {
+            channelID = [emoteManager.httpClient ownerIDForVideoID:videoID];
+            if(isChannelID(channelID))
+                [channelIDsByVideoID setObject:channelID forKey:videoID];
         }
+        if(isChannelID(channelID))
+            loadChannelEmotesNow(channelID);
         if(completion)
             completion();
     });
@@ -117,29 +140,63 @@ static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *cha
     return [emoteManager emoteNameRegistryForChannel:channelID];
 }
 
+static NSDictionary<NSString *, BTTVEmote *> *waitForVideoEmotes(NSString *videoID) {
+    NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
+    if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
+        FMLog("VOD chat for video %{public}@ is waiting for its emotes", videoID);
+        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+        loadVideoEmotes(videoID, ^{
+            dispatch_semaphore_signal(loaded);
+        });
+        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
+            FMLog("Timed out loading emotes for video %{public}@ chat", videoID);
+        channelID = [channelIDsByVideoID objectForKey:videoID];
+    }
+    return [emoteManager emoteNameRegistryForChannel:channelID];
+}
+
 #pragma mark - Chat history
 
-// Chat history comes from GQL (ChatHistory, TheaterPortalPreload) instead of KMPMobileChat
+// Chat history (ChatHistory, TheaterPortalPreload) and VOD chat (VideoCommentsBy*) come from GQL instead of KMPMobileChat
 static NSSet<NSString *> *chatHistoryOperations;
 
-static BOOL isChatHistoryRequest(NSURLRequest *request) {
+// The variables of each chat history operation in the request
+static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL log) {
     if(![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody)
-        return NO;
+        return @[];
 
     id json = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
-    BOOL isChatHistory = NO;
+    NSMutableArray *variablesList = [[NSMutableArray alloc] init];
     for(NSDictionary *operation in [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}]) {
         if(![operation isKindOfClass:[NSDictionary class]] || ![chatHistoryOperations containsObject:operation[@"operationName"]])
             continue;
-        isChatHistory = YES;
-        FMLog("Holding back %{public}@ response to add emotes", operation[@"operationName"]);
-
-        // Start on the emotes now so the response doesn't have to wait as long
+        if(log)
+            FMLog("Holding back %{public}@ response to add emotes", operation[@"operationName"]);
         NSDictionary *variables = operation[@"variables"];
-        if([variables isKindOfClass:[NSDictionary class]] && isChannelID(variables[@"channelID"]))
-            loadChannelEmotes(variables[@"channelID"], nil);
+        [variablesList addObject:[variables isKindOfClass:[NSDictionary class]] ? variables : @{}];
     }
-    return isChatHistory;
+    return variablesList;
+}
+
+// VOD comment queries only have the video ID (numeric, like channel IDs)
+static NSString *chatHistoryVideoID(NSURLRequest *request) {
+    for(NSDictionary *variables in chatHistoryVariables(request, NO)) {
+        if(isChannelID(variables[@"videoID"]))
+            return variables[@"videoID"];
+    }
+    return nil;
+}
+
+static BOOL isChatHistoryRequest(NSURLRequest *request) {
+    NSArray<NSDictionary *> *variablesList = chatHistoryVariables(request, YES);
+    // Start on the emotes now so the response doesn't have to wait as long
+    for(NSDictionary *variables in variablesList) {
+        if(isChannelID(variables[@"channelID"]))
+            loadChannelEmotes(variables[@"channelID"], nil);
+        if(isChannelID(variables[@"videoID"]))
+            loadVideoEmotes(variables[@"videoID"], nil);
+    }
+    return variablesList.count > 0;
 }
 
 static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
@@ -204,7 +261,79 @@ static void addEmotesToChatHistory(id json) {
         addEmotesToChatHistory(value);
 }
 
-static NSData *chatHistoryDataWithEmotes(NSData *data) {
+static NSUInteger codePointCount(NSString *text) {
+    return [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4;
+}
+
+static BOOL isNull(id value) {
+    return !value || value == [NSNull null];
+}
+
+// VOD comment fragments: plain text has no emote or mention. Emotes say where they are in the message (in code
+// points, `to` inclusive), so offsets are counted over every fragment.
+static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
+    NSMutableArray *newFragments = [[NSMutableArray alloc] init];
+    __block NSUInteger offset = 0;
+    for(NSDictionary *fragment in fragments) {
+        NSString *text = [fragment isKindOfClass:[NSDictionary class]] ? fragment[@"text"] : nil;
+        if(![text isKindOfClass:[NSString class]]) {
+            [newFragments addObject:fragment];
+            continue;
+        }
+        NSUInteger fragmentEnd = offset + codePointCount(text);
+        if(!isNull(fragment[@"emote"]) || !isNull(fragment[@"mention"])) {
+            [newFragments addObject:fragment];
+            offset = fragmentEnd;
+            continue;
+        }
+
+        NSString *typename = fragment[@"__typename"] ?: @"VideoCommentMessageFragment";
+        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, ^(NSString *piece) {
+            [newFragments addObject:@{@"__typename": typename, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
+            offset += codePointCount(piece);
+        }, ^(NSString *name, NSString *emoteID) {
+            NSUInteger length = codePointCount(name);
+            [newFragments addObject:@{@"__typename": typename, @"text": name, @"mention": [NSNull null], @"emote": @{
+                @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": emoteID, @"setID": @"", @"from": @(offset), @"to": @(offset + length - 1)
+            }}];
+            offset += length;
+            (*emoteCount)++;
+        });
+        if(!foundEmote)
+            [newFragments addObject:fragment];
+        offset = fragmentEnd;
+    }
+    return newFragments;
+}
+
+// Finds every comments { edges { node { message { messageFragments } } } } in a response
+static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount, NSUInteger *commentCount) {
+    if([json isKindOfClass:[NSArray class]]) {
+        for(id item in json)
+            addEmotesToVideoComments(item, nameRegistry, emoteCount, commentCount);
+        return;
+    }
+    if(![json isKindOfClass:[NSMutableDictionary class]])
+        return;
+
+    NSArray *edges = json[@"edges"];
+    if([edges isKindOfClass:[NSArray class]]) {
+        for(NSDictionary *edge in edges) {
+            NSDictionary *node = [edge isKindOfClass:[NSDictionary class]] ? edge[@"node"] : nil;
+            NSMutableDictionary *message = [node isKindOfClass:[NSDictionary class]] ? node[@"message"] : nil;
+            if([message isKindOfClass:[NSMutableDictionary class]] && [message[@"messageFragments"] isKindOfClass:[NSArray class]]) {
+                message[@"messageFragments"] = addEmotesToVideoCommentFragments(message[@"messageFragments"], nameRegistry, emoteCount);
+                (*commentCount)++;
+            }
+        }
+        return;
+    }
+
+    for(id value in [json allValues])
+        addEmotesToVideoComments(value, nameRegistry, emoteCount, commentCount);
+}
+
+static NSData *chatHistoryDataWithEmotes(NSData *data, NSURLRequest *request) {
     NSError *error;
     id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
     if(!json) {
@@ -212,6 +341,18 @@ static NSData *chatHistoryDataWithEmotes(NSData *data) {
         return data;
     }
     addEmotesToChatHistory(json);
+
+    NSString *videoID = chatHistoryVideoID(request);
+    if(videoID) {
+        NSDate *start = [NSDate date];
+        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForVideoEmotes(videoID);
+        NSUInteger emoteCount = 0, commentCount = 0;
+        addEmotesToVideoComments(json, nameRegistry, &emoteCount, &commentCount);
+        // No comments means the response shape changed
+        FMLog("VOD chat for video %{public}@ (channel %{public}@): added %lu emotes to %lu comments (%lu emote names, waited %.1fs)",
+              videoID, [channelIDsByVideoID objectForKey:videoID], (unsigned long)emoteCount, (unsigned long)commentCount, (unsigned long)nameRegistry.count, -start.timeIntervalSinceNow);
+    }
+
     NSData *newData = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
     if(!newData)
         FMLog("Couldn't serialize chat history, left as is: %{public}@", error.localizedDescription);
@@ -248,7 +389,7 @@ static NSMutableData *chatHistoryBuffer(NSURLSessionTask *task) {
         objc_setAssociatedObject(task, &chatHistoryBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if(error)
             FMLog("Chat history request failed, left as is: %{public}@", error.localizedDescription);
-        NSData *data = error ? buffer : chatHistoryDataWithEmotes(buffer);
+        NSData *data = error ? buffer : chatHistoryDataWithEmotes(buffer, task.originalRequest);
         if(data.length)
             [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
     }
@@ -501,9 +642,10 @@ static void joinedChannel(id channelID) {
 %ctor {
     emoteManager = [[FMEmoteManager alloc] init];
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
-    chatHistoryOperations = [NSSet setWithArray:@[@"ChatHistory", @"TheaterPortalPreload"]];
+    chatHistoryOperations = [NSSet setWithArray:@[@"ChatHistory", @"TheaterPortalPreload", @"VideoCommentsByContentOffset", @"VideoCommentsByCursor"]];
     channelIDsByName = [[NSMutableDictionary alloc] init];
     channelIDsByMessageID = [[NSCache alloc] init];
     channelIDsByMessageID.countLimit = 5000;
+    channelIDsByVideoID = [[NSCache alloc] init];
     %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"));
 }
