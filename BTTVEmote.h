@@ -12,6 +12,8 @@ typedef enum {
 @property (nonatomic, retain) NSURL *pageURL; // the emote's page on its provider's site
 @property (nonatomic, retain) NSString *ownerName; // who uploaded it, if the API says
 @property (assign) BOOL isAnimated;
+@property (assign) double aspectRatio; // width / height, 0 if the API doesn't say (drawn square like Twitch's)
+@property (assign) BOOL isZeroWidth; // drawn over the emote before it (7TV)
 @property (assign) EmoteType emoteType;
 
 - (id)initWithDictData:(NSDictionary *)data emoteType:(EmoteType)type;

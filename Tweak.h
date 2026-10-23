@@ -32,3 +32,14 @@
 @property (readonly) NSString *channelName;
 @property (readonly) id event;
 @end
+
+
+// Swift classes in Twitch, used through their ObjC methods (TwitchKit's TWMessageEmoteToken, Twitch's MessageString)
+@interface TWMessageEmoteToken : NSObject
+@property (readonly) NSString *emoteId;
+@end
+
+// A chat message's text, laid out by Twitch's MessageStringLayoutManager
+@interface TWMessageString : NSObject
+@property (readonly) NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteLocationsMap; // character index -> emote
+@end

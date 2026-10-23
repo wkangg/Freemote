@@ -4,6 +4,8 @@
 #import "FMLog.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <mach/mach.h>
+
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"
@@ -77,11 +79,12 @@ static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *n
         FMLogFirst(10, "Word looks like emote %{public}@ but doesn't match: %{public}@", stripped, codePointsOf(word));
 }
 
-// Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise
-static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
+// Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
+// afterEmote: the text comes right after an emote, which a zero-width emote at its start goes over.
+static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, BOOL afterEmote, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
     NSMutableString *pendingText = [[NSMutableString alloc] init];
-    BOOL foundEmote = NO;
+    BOOL foundEmote = NO, lastWasEmote = afterEmote;
     for(NSUInteger i = 0; i < words.count; i++) {
         NSString *word = words[i];
         NSRange nameRange = NSMakeRange(0, word.length);
@@ -98,9 +101,13 @@ static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote
             foundEmote = YES;
             // Invisible characters around the name stay as text
             [pendingText appendString:[word substringToIndex:nameRange.location]];
+            // A zero-width emote goes right after the emote it's drawn over, without the space between them
+            if(emote.isZeroWidth && lastWasEmote && [pendingText isEqualToString:@" "])
+                [pendingText setString:@""];
             if(pendingText.length)
                 onText([pendingText copy]);
             onEmote([word substringWithRange:nameRange], [FMEmoteIDPrefix stringByAppendingString:emote.emoteID]);
+            lastWasEmote = YES;
             [pendingText setString:[word substringFromIndex:NSMaxRange(nameRange)]];
         } else {
             [pendingText appendString:word];
@@ -128,7 +135,8 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictiona
 
         // flags is non-null in Kotlin and holds per-token AutoMod levels, so every split piece keeps it
         id flags = textToken.flags;
-        BOOL foundEmote = splitTextAtEmotes(textToken.text, nameRegistry, ^(NSString *text) {
+        BOOL afterEmote = [newTokens.lastObject isKindOfClass:EmoteToken];
+        BOOL foundEmote = splitTextAtEmotes(textToken.text, nameRegistry, afterEmote, ^(NSString *text) {
             [newTokens addObject:[[TextToken alloc] initWithText:text flags:flags]];
         }, ^(NSString *name, NSString *emoteID) {
             [newTokens addObject:[[EmoteToken alloc] initWithText:name id:emoteID]];
@@ -282,7 +290,9 @@ static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *
             continue;
         }
 
-        BOOL foundEmote = splitTextAtEmotes(fragment[@"text"], nameRegistry, ^(NSString *text) {
+        NSDictionary *previousContent = [newFragments.lastObject isKindOfClass:[NSDictionary class]] ? newFragments.lastObject[@"content"] : nil;
+        BOOL afterEmote = [previousContent isKindOfClass:[NSDictionary class]] && [@"Emote" isEqual:previousContent[@"__typename"]];
+        BOOL foundEmote = splitTextAtEmotes(fragment[@"text"], nameRegistry, afterEmote, ^(NSString *text) {
             [newFragments addObject:@{@"__typename": @"MessageFragment", @"text": text, @"content": [NSNull null]}];
         }, ^(NSString *name, NSString *emoteID) {
             [newFragments addObject:@{@"__typename": @"MessageFragment", @"text": name, @"content": @{@"__typename": @"Emote", @"emoteID": emoteID, @"setID": @"", @"token": name}}];
@@ -361,7 +371,9 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
         }
 
         NSString *fragmentType = fragment[@"__typename"] ?: @"VideoCommentMessageFragment";
-        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, ^(NSString *piece) {
+        NSDictionary *previous = newFragments.lastObject;
+        BOOL afterEmote = [previous isKindOfClass:[NSDictionary class]] && !isNull(previous[@"emote"]);
+        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, afterEmote, ^(NSString *piece) {
             [newFragments addObject:@{@"__typename": fragmentType, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
             offset += codePointCount(piece);
         }, ^(NSString *name, NSString *emoteID) {
@@ -372,11 +384,14 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             offset += length;
             (*emoteCount)++;
         });
-        if(!foundEmote)
+        // Offsets follow the split pieces, which leave out the space before a zero-width emote
+        if(!foundEmote) {
             [newFragments addObject:fragment];
-        offset = fragmentEnd;
+            offset = fragmentEnd;
+        }
     }
     return newFragments;
+
 }
 
 // Finds every comments { edges { node { message { messageFragments } } } } in a response
@@ -865,6 +880,161 @@ static void joinedChannel(id channelID) {
 
 %end
 
+#pragma mark - Emote sizes
+
+// Chat lays out an emote as a text attachment, then draws its image from the left edge of the attachment's space.
+// Twitch sizes both by Twitch emote ID, which makes ours 28pt squares, so ours get their own width here: the
+// attachment's bounds are the space it takes in the line, and MessageString's sizeOfImageAttachment(at:) is the size
+// of the image drawn there.
+
+// An empty glyph rect doesn't get its image drawn, so an emote always takes up a little space
+#define FMMinimumEmoteAdvance 0.01
+
+// Set once the image sizes are replaced: widening the attachments without them would draw images over the text
+static Class MessageStringLayoutManager;
+
+static BTTVEmote *emoteForToken(TWMessageEmoteToken *token) {
+    NSString *emoteID = [token respondsToSelector:@selector(emoteId)] ? token.emoteId : nil;
+    if(![emoteID isKindOfClass:[NSString class]] || ![emoteID hasPrefix:FMEmoteIDPrefix])
+        return nil;
+    return emoteManager.emoteRegistry[[emoteID substringFromIndex:FMEmoteIDPrefix.length]];
+}
+
+static NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteTokens(TWMessageString *messageString) {
+    NSDictionary *tokens = [messageString respondsToSelector:@selector(emoteLocationsMap)] ? messageString.emoteLocationsMap : nil;
+    return [tokens isKindOfClass:[NSDictionary class]] ? tokens : nil;
+}
+
+// Our emotes keep Twitch's height, with their own width
+static CGSize emoteImageSize(BTTVEmote *emote, CGSize size) {
+    if(emote.aspectRatio > 0)
+        size.width = MAX(1, floor(size.height * emote.aspectRatio));
+    return size;
+}
+
+// Swift calls sizeOfImageAttachment(at:) through the class's vtable rather than the ObjC method, so the vtable entry is
+// replaced. A Swift method gets self in x20, which clang calls swift_context.
+typedef __attribute__((swiftcall)) CGSize (*FMImageSizeFunction)(NSInteger index, __attribute__((swift_context)) void *messageString);
+static FMImageSizeFunction originalMessageStringImageSize, originalChatMessageStringImageSize;
+
+static CGSize messageStringImageSize(void *messageString, NSInteger index, CGSize size) {
+    BTTVEmote *emote = emoteForToken(emoteTokens((__bridge TWMessageString *)messageString)[@(index)]);
+    return emote ? emoteImageSize(emote, size) : size;
+}
+
+__attribute__((swiftcall)) static CGSize newMessageStringImageSize(NSInteger index, __attribute__((swift_context)) void *messageString) {
+    return messageStringImageSize(messageString, index, originalMessageStringImageSize(index, messageString));
+}
+
+__attribute__((swiftcall)) static CGSize newChatMessageStringImageSize(NSInteger index, __attribute__((swift_context)) void *messageString) {
+    return messageStringImageSize(messageString, index, originalChatMessageStringImageSize(index, messageString));
+}
+
+// The vtable entry for the Swift method behind an ObjC method: the ObjC method is a thunk that calls it directly, so
+// it's whichever of the thunk's calls is also in the vtable
+static void **swiftMethodEntry(Class cls, SEL selector) {
+    Method method = cls ? class_getInstanceMethod(cls, selector) : NULL;
+    uint8_t *metadata = (uint8_t *)(__bridge void *)cls;
+    // Swift class metadata: ObjC class data at 32 (bit 1 set for Swift), class size and address point at 56 and 60,
+    // then the class's members (field offsets and the vtable) from 80
+    if(!method || !(*(uintptr_t *)(metadata + 32) & 2))
+        return NULL;
+    uint32_t classSize = *(uint32_t *)(metadata + 56), addressPoint = *(uint32_t *)(metadata + 60);
+    void **members = (void **)(metadata + 80);
+    NSUInteger memberCount = classSize > addressPoint + 80 ? (classSize - addressPoint - 80) / sizeof(void *) : 0;
+
+    const uint32_t *code = (const uint32_t *)method_getImplementation(method);
+    for(int i = 0; i < 16 && code[i] != 0xD65F03C0; i++) { // up to ret
+        if((code[i] & 0xFC000000) != 0x94000000) // bl
+            continue;
+        const uint32_t *target = code + i + ((int32_t)(code[i] << 6) >> 6);
+        for(NSUInteger j = 0; j < memberCount; j++) {
+            if(members[j] == target)
+                return &members[j];
+        }
+    }
+    return NULL;
+}
+
+static BOOL replaceSwiftMethod(void **entry, void *replacement, void **original) {
+    // Class metadata is writable data already; this only makes sure
+    if(vm_protect(mach_task_self(), (vm_address_t)entry & ~(vm_address_t)vm_page_mask, vm_page_size, NO, VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS)
+        return NO;
+    *original = *entry;
+    *entry = replacement;
+    return YES;
+}
+
+static void hookEmoteSizes(void) {
+    SEL selector = @selector(sizeOfImageAttachmentAtCharacterIndex:);
+    void **entry = swiftMethodEntry(objc_getClass("_TtC6Twitch13MessageString"), selector);
+    void **chatEntry = swiftMethodEntry(objc_getClass("_TtC6Twitch17ChatMessageString"), selector);
+    // Both or neither, so a message's attachments and images always agree
+    if(entry && chatEntry && replaceSwiftMethod(entry, (void *)newMessageStringImageSize, (void **)&originalMessageStringImageSize)
+       && replaceSwiftMethod(chatEntry, (void *)newChatMessageStringImageSize, (void **)&originalChatMessageStringImageSize)) {
+        MessageStringLayoutManager = objc_getClass("_TtC6Twitch26MessageStringLayoutManager");
+        FMLog("Hooked emote sizes");
+    } else {
+        FMLog("MessageString changed, emotes stay square (%d, %d)", entry != NULL, chatEntry != NULL);
+    }
+}
+
+// The width an emote takes in the line. A zero-width emote is drawn over the emote before it: the emotes in such a
+// stack start in the same place and take up as much space as the widest one. Each one after the first is centered
+// as far as it can be, since an image can't start further left than the one before it.
+static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tokens, NSTextStorage *textStorage, NSUInteger index, CGSize size) {
+    BOOL (^isOverlay)(NSUInteger) = ^BOOL(NSUInteger i) {
+        return i > 0 && i < textStorage.length && tokens[@(i - 1)] && emoteForToken(tokens[@(i)]).isZeroWidth;
+    };
+    CGFloat (^width)(NSUInteger) = ^CGFloat(NSUInteger i) {
+        if(i == index)
+            return emoteImageSize(emoteForToken(tokens[@(i)]), size).width;
+        NSTextAttachment *attachment = [textStorage attribute:NSAttachmentAttributeName atIndex:i effectiveRange:NULL];
+        return [attachment isKindOfClass:[NSTextAttachment class]] ? emoteImageSize(emoteForToken(tokens[@(i)]), attachment.bounds.size).width : 0;
+    };
+
+    NSUInteger first = index, last = index;
+    while(isOverlay(first))
+        first--;
+    while(isOverlay(last + 1))
+        last++;
+    if(first == last)
+        return width(index);
+
+    CGFloat stackWidth = 0;
+    for(NSUInteger i = first; i <= last; i++)
+        stackWidth = MAX(stackWidth, width(i));
+    // Where this emote's image and the next one's start, from the left of the stack
+    CGFloat start = 0, nextStart = stackWidth;
+    for(NSUInteger i = first + 1; i <= last; i++) {
+        CGFloat centered = MAX(start, (stackWidth - width(i)) / 2);
+        if(i > index) {
+            nextStart = centered;
+            break;
+        }
+        start = centered;
+    }
+    FMLogFirst(5, "Emote at %lu is stacked with %lu others, %.1fpt wide", (unsigned long)index, (unsigned long)(last - first), stackWidth);
+    return MAX(FMMinimumEmoteAdvance, nextStart - start);
+}
+
+%hook NSTextAttachment
+
+- (CGRect)attachmentBoundsForTextContainer:(NSTextContainer *)textContainer proposedLineFragment:(CGRect)lineFragment glyphPosition:(CGPoint)position characterIndex:(NSUInteger)characterIndex {
+    CGRect bounds = %orig;
+    NSLayoutManager *layoutManager = textContainer.layoutManager;
+    if(!MessageStringLayoutManager || ![layoutManager isKindOfClass:MessageStringLayoutManager])
+        return bounds;
+    NSDictionary<NSNumber *, TWMessageEmoteToken *> *tokens = emoteTokens(swiftIvar(layoutManager, "messageString"));
+    if(tokens[@(characterIndex)]) {
+        bounds.size.width = emoteAdvance(tokens, layoutManager.textStorage, characterIndex, bounds.size);
+        FMLogFirst(5, "Emote at %lu takes %.1fpt", (unsigned long)characterIndex, bounds.size.width);
+    }
+    return bounds;
+}
+
+%end
+
 #pragma mark - Emote images
 
 %hook NSURLRequest
@@ -885,6 +1055,7 @@ static void joinedChannel(id channelID) {
 
 %ctor {
     emoteManager = [[FMEmoteManager alloc] init];
+    hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
     chatHistoryOperations = [NSSet setWithArray:@[@"ChatHistory", @"TheaterPortalPreload", @"VideoCommentsByContentOffset", @"VideoCommentsByCursor"]];
     channelIDsByName = [[NSMutableDictionary alloc] init];

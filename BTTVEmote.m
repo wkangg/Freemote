@@ -48,7 +48,8 @@
     return self;
 }
 
-// 7TV emote set entry: {id, name (the alias used in this set), data: {animated, owner: {display_name}, ...}}
+// 7TV emote set entry: {id, name (the alias used in this set), flags, data: {animated, owner: {display_name},
+// host: {files: [{width, height}, ...]}, ...}}
 - (BOOL)loadSevenTVData:(NSDictionary *)data {
     NSString *emoteID = data[@"id"];
     NSString *name = data[@"name"];
@@ -64,7 +65,16 @@
         NSDictionary *owner = emoteData[@"owner"];
         if([owner isKindOfClass:[NSDictionary class]] && [owner[@"display_name"] isKindOfClass:[NSString class]])
             _ownerName = owner[@"display_name"];
+        // Every file is the same image at a different scale
+        NSDictionary *host = emoteData[@"host"];
+        NSArray *files = [host isKindOfClass:[NSDictionary class]] ? host[@"files"] : nil;
+        NSDictionary *file = [files isKindOfClass:[NSArray class]] ? files.firstObject : nil;
+        if([file isKindOfClass:[NSDictionary class]] && [file[@"width"] isKindOfClass:[NSNumber class]]
+           && [file[@"height"] isKindOfClass:[NSNumber class]] && [file[@"height"] doubleValue] > 0)
+            _aspectRatio = [file[@"width"] doubleValue] / [file[@"height"] doubleValue];
     }
+    // The set's own flag, so a channel can turn it off for an emote that's zero-width by default
+    _isZeroWidth = [data[@"flags"] isKindOfClass:[NSNumber class]] && ([data[@"flags"] integerValue] & 1);
     _pageURL = [NSURL URLWithString:[@"https://7tv.app/emotes/" stringByAppendingString:emoteID]];
 
     // 7TV serves webp/avif plus gif (animated) or png (static); the app can only decode the latter
