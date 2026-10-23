@@ -79,7 +79,7 @@ jobs:
         run: |
           echo "::add-mask::$IPA_URL"
           # Some file hosts (e.g. catbox) drop long transfers; resume until the file is complete
-          for attempt in $(seq 1 20); do
+          for attempt in $(seq 1 3); do
             curl -fL -C - --retry 5 --retry-all-errors --retry-delay 3 \
               -o "${{ github.workspace }}/App.ipa" "$IPA_URL" && break
             echo "Download interrupted (attempt $attempt), resuming..."
