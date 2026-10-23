@@ -25,9 +25,10 @@ static NSCache<NSString *, NSString *> *channelIDsByVideoID;
 static NSCache<NSString *, NSString *> *channelIDsByNonce;
 static NSString *lastSentChannelID; // @synchronized(channelIDsByName)
 
-// Zero-width and blank characters that chat clients add to get around Twitch's duplicate message check
+// Zero-width and blank characters that chat clients add to get around Twitch's duplicate message check, and control
+// characters (e.g. a line ending left on the message)
 static BOOL isInvisibleCharacter(UTF32Char c) {
-    return c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x2060 && c <= 0x2064)
+    return c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0xA0 || c == 0xAD || c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x180E || (c >= 0x200B && c <= 0x200F) || (c >= 0x2060 && c <= 0x2064)
         || c == 0x2800 || c == 0x3164 || (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFEFF || (c >= 0xE0000 && c <= 0xE007F);
 }
 
@@ -66,10 +67,10 @@ static NSString *codePointsOf(NSString *word) {
     return [codePoints componentsJoinedByString:@" "];
 }
 
-// For finding other characters that keep a word from matching: logs non-ASCII words that are an emote name once
-// everything but letters and digits is taken out
+// For finding other characters that keep a word from matching: logs words that are an emote name once everything but
+// letters and digits is taken out
 static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
-    if([word canBeConvertedToEncoding:NSASCIIStringEncoding])
+    if([word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
         return;
     NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
     if(stripped.length && nameRegistry[stripped])
