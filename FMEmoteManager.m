@@ -64,7 +64,6 @@
     // ID registry first: a message can only use a name once its image URL resolves
     self.emoteRegistry = registry;
     self.channelNameRegistries = channelNameRegistries;
-    self.lastLoadedChannelID = channelID;
 }
 
 - (BOOL)hasEmotesForChannel:(NSString *)channelID {
