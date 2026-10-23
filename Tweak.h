@@ -43,3 +43,8 @@
 @interface TWMessageString : NSObject
 @property (readonly) NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteLocationsMap; // character index -> emote
 @end
+
+// SocketRocket, which React Native's WebSocket module uses
+@interface SRWebSocket : NSObject
+@property (readonly) NSURL *url;
+@end

@@ -305,7 +305,8 @@ static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *
     return newFragments;
 }
 
-// Finds every channel { id recentChatMessages { content { contentFragments|messageFragments } } } in a response
+// Finds every channel { id recentChatMessages { content { contentFragments|messageFragments|fragments } } } in a
+// response (native ChatHistory and TheaterPortalPreload, React Native ChatHistory)
 static void addEmotesToChatHistory(id json) {
     if([json isKindOfClass:[NSArray class]]) {
         for(id item in json)
@@ -325,7 +326,7 @@ static void addEmotesToChatHistory(id json) {
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
             BOOL hasFragments = NO;
             if([content isKindOfClass:[NSMutableDictionary class]]) {
-                for(NSString *key in @[@"contentFragments", @"messageFragments"]) {
+                for(NSString *key in @[@"contentFragments", @"messageFragments", @"fragments"]) {
                     if([content[key] isKindOfClass:[NSArray class]]) {
                         content[key] = addEmotesToFragments(content[key], nameRegistry, &emoteCount);
                         hasFragments = YES;
@@ -588,29 +589,176 @@ static NSMutableData *heldResponseBuffer(NSURLSessionTask *task) {
     return [buffer isKindOfClass:[NSMutableData class]] ? buffer : nil;
 }
 
-// Apollo collects a task's data and only parses it on completion, so hold the chunks back and hand over
-// the rewritten response right before that
+// YES if the chunk was held back
+static BOOL holdResponseData(NSURLSessionDataTask *task, NSData *data) {
+    NSMutableData *buffer = heldResponseBuffer(task);
+    [buffer appendData:data];
+    return buffer != nil;
+}
+
+// The rewritten response to hand over before the task completes, or nil if it wasn't held back
+static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error) {
+    NSMutableData *buffer = heldResponseBuffer(task);
+    if(!buffer || ![task isKindOfClass:[NSURLSessionDataTask class]])
+        return nil;
+    objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if(error)
+        FMLog("Held back request failed, left as is: %{public}@", error.localizedDescription);
+    return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest);
+}
+
+// Apollo (native screens) and React Native's fetch (the React Native stream screen) both collect a task's data and
+// only parse it on completion, so hold the chunks back and hand over the rewritten response right before that
 %hook ApolloURLSessionClient
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
-    NSMutableData *buffer = heldResponseBuffer(dataTask);
-    if(buffer)
-        [buffer appendData:data];
-    else
+    if(!holdResponseData(dataTask, data))
         %orig;
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    NSMutableData *buffer = heldResponseBuffer(task);
-    if(buffer && [task isKindOfClass:[NSURLSessionDataTask class]]) {
-        objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if(error)
-            FMLog("Held back request failed, left as is: %{public}@", error.localizedDescription);
-        NSData *data = error ? buffer : responseDataWithEmotes(buffer, task.originalRequest);
-        if(data.length)
-            [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
-    }
+    NSData *data = finishHeldResponse(task, error);
+    if(data.length)
+        [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
     %orig;
+}
+
+%end
+
+%hook RCTHTTPRequestHandler
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    if(!holdResponseData(dataTask, data))
+        %orig;
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    NSData *data = finishHeldResponse(task, error);
+    if(data.length)
+        [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
+    %orig;
+}
+
+%end
+
+#pragma mark - React Native chat
+
+// Most streams open a React Native screen whose chat is its own IRC client on a WebSocket, without KMPMobileChat
+// (vertical streams still open the native one). Twitch's IRC messages carry their channel in room-id and say where
+// their emotes are in the emotes tag (<id>:<from>-<to>,.../..., in code points, `to` inclusive), so ours are added to
+// that tag. The JS builds the image URL from the ID.
+
+// The positions the message's emotes tag already covers
+static NSIndexSet *ircEmotePositions(NSString *emotes) {
+    NSMutableIndexSet *positions = [[NSMutableIndexSet alloc] init];
+    for(NSString *emote in [emotes componentsSeparatedByString:@"/"]) {
+        NSRange colon = [emote rangeOfString:@":"];
+        if(colon.location == NSNotFound)
+            continue;
+        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
+            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
+            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue)
+                [positions addIndexesInRange:NSMakeRange(ends[0].integerValue, ends[1].integerValue - ends[0].integerValue + 1)];
+        }
+    }
+    return positions;
+}
+
+// Our emotes in the text as <id>:<from>-<to>,.../..., or nil if there are none
+static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSIndexSet *taken, NSUInteger *emoteCount) {
+    NSMutableArray<NSString *> *emoteIDs = [[NSMutableArray alloc] init];
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *ranges = [[NSMutableDictionary alloc] init];
+    // Where the next piece starts in the text. The pieces leave out the space before a zero-width emote, so emotes
+    // are looked up from there rather than counted.
+    __block NSUInteger cursor = 0;
+    splitTextAtEmotes(text, nameRegistry, NO, ^(NSString *piece) {
+        cursor = MIN(text.length, cursor + piece.length);
+    }, ^(NSString *name, NSString *emoteID) {
+        NSRange range = [text rangeOfString:name options:NSLiteralSearch range:NSMakeRange(cursor, text.length - cursor)];
+        if(range.location == NSNotFound)
+            return;
+        cursor = NSMaxRange(range);
+        NSUInteger from = codePointCount([text substringToIndex:range.location]), length = codePointCount(name);
+        if([taken intersectsIndexesInRange:NSMakeRange(from, length)])
+            return;
+        if(!ranges[emoteID]) {
+            ranges[emoteID] = [[NSMutableArray alloc] init];
+            [emoteIDs addObject:emoteID];
+        }
+        [ranges[emoteID] addObject:[NSString stringWithFormat:@"%lu-%lu", (unsigned long)from, (unsigned long)(from + length - 1)]];
+        (*emoteCount)++;
+    });
+
+    NSMutableArray<NSString *> *emotes = [[NSMutableArray alloc] init];
+    for(NSString *emoteID in emoteIDs)
+        [emotes addObject:[NSString stringWithFormat:@"%@:%@", emoteID, [ranges[emoteID] componentsJoinedByString:@","]]];
+    return emotes.count ? [emotes componentsJoinedByString:@"/"] : nil;
+}
+
+// "@<tags> :<prefix> <command> <params> :<text>". Starts loading the channel's emotes from any line with a room-id
+// (ROOMSTATE comes right after joining), and adds them to PRIVMSG and USERNOTICE lines.
+static NSString *ircLineWithEmotes(NSString *line) {
+    NSRange tagsEnd = [line rangeOfString:@" "];
+    if(![line hasPrefix:@"@"] || tagsEnd.location == NSNotFound)
+        return line;
+    NSMutableArray<NSString *> *tags = [[[line substringWithRange:NSMakeRange(1, tagsEnd.location - 1)] componentsSeparatedByString:@";"] mutableCopy];
+    NSString *rest = [line substringFromIndex:NSMaxRange(tagsEnd)];
+    NSArray<NSString *> *words = [rest componentsSeparatedByString:@" "];
+    NSString *command = words.count > 1 ? words[1] : nil;
+
+    NSString *channelID, *emotes = @"";
+    NSUInteger emotesIndex = NSNotFound;
+    for(NSUInteger i = 0; i < tags.count; i++) {
+        if([tags[i] hasPrefix:@"room-id="]) {
+            channelID = [tags[i] substringFromIndex:8];
+        } else if([tags[i] hasPrefix:@"emotes="]) {
+            emotes = [tags[i] substringFromIndex:7];
+            emotesIndex = i;
+        }
+    }
+    if(!isChannelID(channelID))
+        return line;
+    if(![emoteManager hasEmotesForChannel:channelID]) {
+        if([command isEqualToString:@"ROOMSTATE"])
+            FMLog("React Native chat joined channel %{public}@", channelID);
+        loadChannelEmotes(channelID, nil);
+    }
+    if(![command isEqualToString:@"PRIVMSG"] && ![command isEqualToString:@"USERNOTICE"])
+        return line;
+
+    NSRange textStart = [rest rangeOfString:@" :"];
+    if(textStart.location == NSNotFound)
+        return line;
+    NSString *text = [rest substringFromIndex:NSMaxRange(textStart)];
+    // /me: positions are in the action's text
+    if([text hasPrefix:@"\x01" "ACTION "])
+        text = [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+
+    NSUInteger emoteCount = 0;
+    NSString *ourEmotes = ircEmotesForText(text, [emoteManager emoteNameRegistryForChannel:channelID], ircEmotePositions(emotes), &emoteCount);
+    if(!ourEmotes)
+        return line;
+    NSString *tag = [@"emotes=" stringByAppendingString:emotes.length ? [NSString stringWithFormat:@"%@/%@", emotes, ourEmotes] : ourEmotes];
+    if(emotesIndex != NSNotFound)
+        tags[emotesIndex] = tag;
+    else
+        [tags addObject:tag];
+    FMLogFirst(5, "React Native chat: added %lu emotes to a %{public}@ in channel %{public}@", (unsigned long)emoteCount, command, channelID);
+    return [NSString stringWithFormat:@"@%@ %@", [tags componentsJoinedByString:@";"], rest];
+}
+
+%hook RCTWebSocketModule
+
+// One WebSocket message can hold several IRC lines
+- (void)webSocket:(SRWebSocket *)webSocket didReceiveMessage:(id)message {
+    NSURL *url = [webSocket respondsToSelector:@selector(url)] ? webSocket.url : nil;
+    if([message isKindOfClass:[NSString class]] && [url.host isEqualToString:@"irc-ws.chat.twitch.tv"]) {
+        NSMutableArray<NSString *> *lines = [[message componentsSeparatedByString:@"\r\n"] mutableCopy];
+        for(NSUInteger i = 0; i < lines.count; i++)
+            lines[i] = ircLineWithEmotes(lines[i]);
+        message = [lines componentsJoinedByString:@"\r\n"];
+    }
+    %orig(webSocket, message);
 }
 
 %end

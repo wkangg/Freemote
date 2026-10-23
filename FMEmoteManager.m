@@ -29,20 +29,20 @@
         dispatch_group_async(group, queue, ^{ bttvGlobalInfo = [httpClient bttvGlobalEmotes]; });
         dispatch_group_async(group, queue, ^{ ffzGlobalInfo = [httpClient ffzGlobalEmotes]; });
         dispatch_group_async(group, queue, ^{ sevenTVGlobalInfo = [httpClient sevenTVGlobalEmotes]; });
-        dispatch_group_async(group, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
     }
     dispatch_group_async(group, queue, ^{ bttvEmoteInfo = [httpClient bttvEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ ffzEmoteInfo = [httpClient ffzEmoteInformationForChannelID:channelID]; });
     dispatch_group_async(group, queue, ^{ sevenTVEmoteInfo = [httpClient sevenTVEmoteInformationForChannelID:channelID]; });
     // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
     dispatch_group_t sizeGroup = dispatch_group_create();
+    if(needsGlobals)
+        dispatch_group_async(sizeGroup, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
     dispatch_group_async(sizeGroup, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     if(needsGlobals) {
         NSUInteger bttv = [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
         NSUInteger ffz = [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
-        [self addFFZSizes:ffzGlobalSets toRegistry:_globalEmoteRegistry];
         NSUInteger sevenTV = [sevenTVGlobalInfo isKindOfClass:[NSDictionary class]]
             ? [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal] : 0;
         self.globalNameRegistry = _globalEmoteNameRegistry;
@@ -76,7 +76,11 @@
     self.channelNameRegistries = channelNameRegistries;
 
     // Sizes land on the same emote objects, so messages after this show FFZ emotes at their own size
-    dispatch_group_notify(sizeGroup, queue, ^{ [self addFFZSizes:ffzRoom toRegistry:registry]; });
+    dispatch_group_notify(sizeGroup, queue, ^{
+        if(needsGlobals)
+            [self addFFZSizes:ffzGlobalSets toRegistry:registry];
+        [self addFFZSizes:ffzRoom toRegistry:registry];
+    });
 }
 
 - (BOOL)hasEmotesForChannel:(NSString *)channelID {
