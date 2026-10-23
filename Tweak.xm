@@ -430,6 +430,8 @@ static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote
 
 // The emote whose card is open, if it's one of ours. Main thread only.
 static BTTVEmote *emoteCardEmote;
+// Its emoteDescription, for the React Native card, which is laid out off the main thread
+static NSString *emoteCardDescription; // @synchronized([BTTVEmote class])
 
 // Our emote that an EmoteCard operation asks for, or nil
 static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
@@ -460,6 +462,9 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
 
     if(emote)
         FMLog("Holding back the emote card for %{public}@ (%{public}@)", emote.emoteText, emote.emoteID);
+    @synchronized([BTTVEmote class]) {
+        emoteCardDescription = [emote emoteDescription];
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         emoteCardEmote = emote;
     });
@@ -541,6 +546,26 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
     %orig;
     if(emoteCardEmote)
         updateEmoteCardTitle((UIView *)self, emoteCardEmote);
+}
+
+%end
+
+// The React Native stream screen's card is drawn by Fabric, whose text all goes through here (to measure and to draw), so
+// its "Twitch Global Emote" subtitle is swapped out. paragraphAttributes is a C++ struct, passed by pointer.
+%hook RCTTextLayoutManager
+
+- (NSTextStorage *)_textStorageAndLayoutManagerWithAttributesString:(NSAttributedString *)attributedString paragraphAttributes:(void *)paragraphAttributes size:(CGSize)size {
+    NSString *description;
+    @synchronized([BTTVEmote class]) {
+        description = emoteCardDescription;
+    }
+    if(description && [attributedString.string isEqualToString:@"Twitch Global Emote"]) {
+        NSMutableAttributedString *newString = [attributedString mutableCopy];
+        [newString replaceCharactersInRange:NSMakeRange(0, newString.length) withString:description];
+        attributedString = newString;
+        FMLogFirst(5, "Replaced the React Native emote card's subtitle with %{public}@", description);
+    }
+    return %orig(attributedString, paragraphAttributes, size);
 }
 
 %end
