@@ -650,6 +650,18 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error) {
 
 %end
 
+// TwitchKit's subclass, which Twitch uses. A tweak that hooks didReceiveData on it (TwitchAdBlock does) gets a copy of
+// Apollo's method from before ours if it loads first, and skips our hook, so ours goes on the subclass too.
+// The chunks that come back through here are already held back, so going through both hooks is fine.
+%hook TKURLSessionClient
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    if(!holdResponseData(dataTask, data))
+        %orig;
+}
+
+%end
+
 %hook RCTHTTPRequestHandler
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
@@ -1263,5 +1275,5 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     channelIDsByVideoID = [[NSCache alloc] init];
     channelIDsByNonce = [[NSCache alloc] init];
     channelIDsByNonce.countLimit = 100;
-    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"));
+    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"));
 }
