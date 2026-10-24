@@ -2,6 +2,7 @@
 #import "Tweak.h"
 #import "FMEmoteManager.h"
 #import "FMLog.h"
+#import "FMReactNativePatch.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach/mach.h>
@@ -10,12 +11,33 @@
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"
 
+// Any number: the React Native segment our JS patch runs as
+#define FMReactNativeSegmentID 0x46524D
+
 // How long a chat history response is held back waiting for the channel's emotes
 #define FMHistoryEmoteTimeout 5
 
 static Class EmoteToken, TextToken, MessagesReceived;
 static FMEmoteManager *emoteManager;
 static dispatch_queue_t emoteQueue;
+
+// freemote_<emote ID>, then _<width per 100 of height> for an emote that isn't square: the React Native screen's chat
+// only gets the ID, so our patch to it (FMReactNativePatch.m) reads the emote's width from there
+static NSString *freemoteEmoteID(BTTVEmote *emote) {
+    long width = MAX(1, lround(emote.aspectRatio * 100));
+    if(emote.aspectRatio <= 0 || width == 100)
+        return [FMEmoteIDPrefix stringByAppendingString:emote.emoteID];
+    return [NSString stringWithFormat:@"%@%@_%ld", FMEmoteIDPrefix, emote.emoteID, width];
+}
+
+// The emote ID in one of our IDs, or nil if it isn't ours
+static NSString *emoteIDFromFreemoteID(NSString *freemoteID) {
+    if(![freemoteID isKindOfClass:[NSString class]] || ![freemoteID hasPrefix:FMEmoteIDPrefix])
+        return nil;
+    NSString *emoteID = [freemoteID substringFromIndex:FMEmoteIDPrefix.length];
+    NSRange width = [emoteID rangeOfString:@"_"];
+    return width.location == NSNotFound ? emoteID : [emoteID substringToIndex:width.location];
+}
 
 // Chat messages don't say which channel they're from, so it's looked up by message ID from the
 // channel event they arrived in, and that event's channel name from the join call
@@ -107,7 +129,7 @@ static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote
                 [pendingText setString:@""];
             if(pendingText.length)
                 onText([pendingText copy]);
-            onEmote([word substringWithRange:nameRange], [FMEmoteIDPrefix stringByAppendingString:emote.emoteID]);
+            onEmote([word substringWithRange:nameRange], freemoteEmoteID(emote));
             lastWasEmote = YES;
             [pendingText setString:[word substringFromIndex:NSMaxRange(nameRange)]];
         } else {
@@ -159,7 +181,7 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
     if(prefixRange.location == NSNotFound)
         return url;
 
-    NSString *emoteID = [path substringFromIndex:NSMaxRange(prefixRange)].pathComponents.firstObject;
+    NSString *emoteID = emoteIDFromFreemoteID([path substringFromIndex:prefixRange.location + 1].pathComponents.firstObject);
     NSURL *imageURL = [emoteManager imageURLForBTTVEmoteID:emoteID];
     if(!imageURL)
         FMLogFirst(10, "No image for emote %{public}@ (%{public}@)", emoteID, url);
@@ -478,12 +500,13 @@ static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
     if(![operation isKindOfClass:[NSDictionary class]] || ![@"EmoteCard" isEqual:operation[@"operationName"]])
         return nil;
     NSDictionary *variables = operation[@"variables"];
-    NSString *emoteID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"emoteID"] : nil;
-    if(![emoteID isKindOfClass:[NSString class]] || ![emoteID hasPrefix:FMEmoteIDPrefix])
+    NSString *freemoteID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"emoteID"] : nil;
+    NSString *emoteID = emoteIDFromFreemoteID(freemoteID);
+    if(!emoteID)
         return nil;
-    BTTVEmote *emote = emoteManager.emoteRegistry[[emoteID substringFromIndex:FMEmoteIDPrefix.length]];
+    BTTVEmote *emote = emoteManager.emoteRegistry[emoteID];
     if(!emote)
-        FMLogFirst(10, "Emote card for unknown emote %{public}@", emoteID);
+        FMLogFirst(10, "Emote card for unknown emote %{public}@", freemoteID);
     return emote;
 }
 
@@ -522,7 +545,7 @@ static void addEmoteCards(id json, NSURLRequest *request) {
         if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
             continue;
         response[@"data"] = @{@"emote": @{
-            @"__typename": @"Emote", @"id": [FMEmoteIDPrefix stringByAppendingString:emote.emoteID], @"token": emote.emoteText, @"setID": @"",
+            @"__typename": @"Emote", @"id": freemoteEmoteID(emote), @"token": emote.emoteText, @"setID": @"",
             @"type": @"GLOBALS", @"owner": [NSNull null], @"subscriptionProduct": [NSNull null], @"bitsBadgeTierSummary": [NSNull null]
         }};
         [response removeObjectForKey:@"errors"];
@@ -840,6 +863,26 @@ static NSString *ircLineWithEmotes(NSString *line) {
 
 %end
 
+// The React Native screen draws each emote as a square in its JS, so a JS patch makes ours wide. A registered segment
+// is evaluated on the JS thread's queue, and the bundle gets queued from here, so the patch runs before the bundle.
+%hook RCTInstance
+
+- (void)_loadScriptFromSource:(id)source {
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"freemote-react-native.js"];
+    NSError *error;
+    if(![self respondsToSelector:@selector(registerSegmentWithId:path:)])
+        FMLog("RCTInstance changed, React Native emotes stay square");
+    else if(![FMReactNativePatchSource writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
+        FMLog("Couldn't write the React Native patch, emotes stay square: %{public}@", error.localizedDescription);
+    else {
+        [self registerSegmentWithId:@(FMReactNativeSegmentID) path:path];
+        FMLog("Registered the React Native emote size patch");
+    }
+    %orig;
+}
+
+%end
+
 #pragma mark - Live chat
 
 static NSString *chatMessageID(KMPMCChatMessageInfo *messageInfo) {
@@ -1145,10 +1188,8 @@ static void joinedChannel(id channelID) {
 static Class MessageStringLayoutManager;
 
 static BTTVEmote *emoteForToken(TWMessageEmoteToken *token) {
-    NSString *emoteID = [token respondsToSelector:@selector(emoteId)] ? token.emoteId : nil;
-    if(![emoteID isKindOfClass:[NSString class]] || ![emoteID hasPrefix:FMEmoteIDPrefix])
-        return nil;
-    return emoteManager.emoteRegistry[[emoteID substringFromIndex:FMEmoteIDPrefix.length]];
+    NSString *emoteID = emoteIDFromFreemoteID([token respondsToSelector:@selector(emoteId)] ? token.emoteId : nil);
+    return emoteID ? emoteManager.emoteRegistry[emoteID] : nil;
 }
 
 static NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteTokens(TWMessageString *messageString) {

@@ -52,3 +52,8 @@
 // React Native's fetch: the NSURLSession delegate for its requests
 @interface RCTHTTPRequestHandler : NSObject <NSURLSessionDataDelegate>
 @end
+
+// A React Native JS runtime (bridgeless). A segment is a JS file it evaluates.
+@interface RCTInstance : NSObject
+- (void)registerSegmentWithId:(NSNumber *)segmentId path:(NSString *)path;
+@end
