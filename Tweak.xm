@@ -202,6 +202,12 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictiona
         });
         if(!foundEmote)
             [newTokens addObjectsFromArray:[tokens subarrayWithRange:run]];
+        if(run.length > 1) {
+            NSMutableString *parts = [[NSMutableString alloc] init];
+            for(KMPMCMessageTokenTextToken *token in [tokens subarrayWithRange:run])
+                [parts appendFormat:@"[\"%@\" flags %@]", token.text, token.flags];
+            FMLogFirst(10, "Matched %lu text tokens as one (%{public}@): %{public}@", (unsigned long)run.length, foundEmote ? @"found emotes" : @"no emotes", parts);
+        }
     }
 
     return newTokens;
