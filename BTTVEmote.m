@@ -42,6 +42,10 @@
             _pageURL = [NSURL URLWithString:[@"https://betterttv.com/emotes/" stringByAppendingString:_emoteID ?: @""]];
             _image1x = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.betterttv.net/emote/%@/1x", _emoteID]];
             _image2x = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.betterttv.net/emote/%@/2x", _emoteID]];
+            // BTTV only gives a size for emotes that aren't square, like AngelThump's 84x28
+            if([data[@"width"] isKindOfClass:[NSNumber class]] && [data[@"height"] isKindOfClass:[NSNumber class]]
+               && [data[@"height"] doubleValue] > 0)
+                _aspectRatio = [data[@"width"] doubleValue] / [data[@"height"] doubleValue];
         }
     }
 
