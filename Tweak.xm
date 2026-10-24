@@ -165,25 +165,39 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictiona
             continue;
         }
 
-        // flags is non-null in Kotlin and holds per-token AutoMod levels, so every split piece keeps it
-        id flags = textToken.flags;
-        // Twitch splits text at colons (e.g. :tf: comes as ":", "tf", ":"), so text tokens next to each other with
-        // the same flags are matched as one
-        NSRange run = NSMakeRange(i, 1);
-        NSMutableString *text = [textToken.text ?: @"" mutableCopy];
-        while(NSMaxRange(run) < tokens.count) {
-            KMPMCMessageTokenTextToken *next = tokens[NSMaxRange(run)];
-            if(![next isKindOfClass:TextToken] || !(next.flags == flags || [next.flags isEqual:flags]))
-                break;
-            [text appendString:next.text ?: @""];
+        // Twitch splits text at colons (e.g. :tf: comes as ":", "tf", ":"), so text tokens next to each other are
+        // matched as one. ends[n] is where the run's nth token ends in the text.
+        NSRange run = NSMakeRange(i, 0);
+        NSMutableString *text = [[NSMutableString alloc] init];
+        NSMutableArray<NSNumber *> *ends = [[NSMutableArray alloc] init];
+        while(NSMaxRange(run) < tokens.count && [tokens[NSMaxRange(run)] isKindOfClass:TextToken]) {
+            [text appendString:((KMPMCMessageTokenTextToken *)tokens[NSMaxRange(run)]).text ?: @""];
+            [ends addObject:@(text.length)];
             run.length++;
         }
         i = NSMaxRange(run) - 1;
 
+        // flags is non-null in Kotlin and holds per-token AutoMod levels, so text keeps the flags of the token it
+        // came from, split at token ends. Pieces start where the last one ended (the space dropped before a
+        // zero-width emote comes before an emote, not a piece), and emotes are looked up from there.
+        __block NSUInteger cursor = 0;
         BOOL afterEmote = [newTokens.lastObject isKindOfClass:EmoteToken];
         BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, afterEmote, ^(NSString *piece) {
-            [newTokens addObject:[[TextToken alloc] initWithText:piece flags:flags]];
+            NSUInteger start = cursor, end = MIN(text.length, cursor + piece.length);
+            for(NSUInteger n = 0; n < ends.count && start < end; n++) {
+                NSUInteger tokenEnd = ends[n].unsignedIntegerValue;
+                if(tokenEnd <= start)
+                    continue;
+                NSUInteger pieceEnd = MIN(tokenEnd, end);
+                id flags = ((KMPMCMessageTokenTextToken *)tokens[run.location + n]).flags;
+                [newTokens addObject:[[TextToken alloc] initWithText:[text substringWithRange:NSMakeRange(start, pieceEnd - start)] flags:flags]];
+                start = pieceEnd;
+            }
+            cursor = end;
         }, ^(NSString *name, NSString *emoteID) {
+            NSRange range = [text rangeOfString:name options:NSLiteralSearch range:NSMakeRange(cursor, text.length - cursor)];
+            if(range.location != NSNotFound)
+                cursor = NSMaxRange(range);
             [newTokens addObject:[[EmoteToken alloc] initWithText:name id:emoteID]];
         });
         if(!foundEmote)
