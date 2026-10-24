@@ -158,23 +158,36 @@ static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictiona
         return tokens;
 
     NSMutableArray *newTokens = [[NSMutableArray alloc] init];
-    for(id token in tokens) {
-        KMPMCMessageTokenTextToken *textToken = token;
-        if(![token isKindOfClass:TextToken]) {
-            [newTokens addObject:token];
+    for(NSUInteger i = 0; i < tokens.count; i++) {
+        KMPMCMessageTokenTextToken *textToken = tokens[i];
+        if(![textToken isKindOfClass:TextToken]) {
+            [newTokens addObject:textToken];
             continue;
         }
 
         // flags is non-null in Kotlin and holds per-token AutoMod levels, so every split piece keeps it
         id flags = textToken.flags;
+        // Twitch splits text at colons (e.g. :tf: comes as ":", "tf", ":"), so text tokens next to each other with
+        // the same flags are matched as one
+        NSRange run = NSMakeRange(i, 1);
+        NSMutableString *text = [textToken.text ?: @"" mutableCopy];
+        while(NSMaxRange(run) < tokens.count) {
+            KMPMCMessageTokenTextToken *next = tokens[NSMaxRange(run)];
+            if(![next isKindOfClass:TextToken] || !(next.flags == flags || [next.flags isEqual:flags]))
+                break;
+            [text appendString:next.text ?: @""];
+            run.length++;
+        }
+        i = NSMaxRange(run) - 1;
+
         BOOL afterEmote = [newTokens.lastObject isKindOfClass:EmoteToken];
-        BOOL foundEmote = splitTextAtEmotes(textToken.text, nameRegistry, afterEmote, ^(NSString *text) {
-            [newTokens addObject:[[TextToken alloc] initWithText:text flags:flags]];
+        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, afterEmote, ^(NSString *piece) {
+            [newTokens addObject:[[TextToken alloc] initWithText:piece flags:flags]];
         }, ^(NSString *name, NSString *emoteID) {
             [newTokens addObject:[[EmoteToken alloc] initWithText:name id:emoteID]];
         });
         if(!foundEmote)
-            [newTokens addObject:token];
+            [newTokens addObjectsFromArray:[tokens subarrayWithRange:run]];
     }
 
     return newTokens;
@@ -956,38 +969,6 @@ static NSString *describeChatMessage(KMPMCChatMessageInfo *messageInfo, NSArray 
             chatMessageID(messageInfo), type, sharedChat ? @"yes" : @"no", [tagNames componentsJoinedByString:@","], text];
 }
 
-static NSUInteger emoteCountInText(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
-    __block NSUInteger count = 0;
-    splitTextAtEmotes(text, nameRegistry, NO, ^(NSString *piece) {}, ^(NSString *name, NSString *emoteID) {
-        count++;
-    });
-    return count;
-}
-
-// For emote names that don't reach us whole in one text token (e.g. :tf:): logs messages with more emote names once
-// the text of their tokens other than emotes is put back together
-static void logEmotesAcrossTokens(NSArray *tokens, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
-    if(tokens.count < 2 || nameRegistry.count == 0)
-        return;
-    NSMutableString *text = [[NSMutableString alloc] init], *parts = [[NSMutableString alloc] init];
-    NSUInteger inTokens = 0;
-    for(id token in tokens) {
-        NSString *tokenText = [token respondsToSelector:@selector(text)] ? ((KMPMCMessageTokenTextToken *)token).text : nil;
-        if(![tokenText isKindOfClass:[NSString class]])
-            tokenText = nil;
-        [parts appendFormat:@"[%@ \"%@\"]", NSStringFromClass([token class]), tokenText ?: @""];
-        if([token isKindOfClass:EmoteToken] || !tokenText) {
-            [text appendString:@" "];
-            continue;
-        }
-        if([token isKindOfClass:TextToken])
-            inTokens += emoteCountInText(tokenText, nameRegistry);
-        [text appendString:tokenText];
-    }
-    if(emoteCountInText(text, nameRegistry) > inTokens)
-        FMLogFirst(10, "Message has emote names split across tokens: %{public}@", parts);
-}
-
 // Your own message, before the server echoes it back with an ID: it only has the client-nonce tag it was sent with
 static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     NSDictionary *tags = messageInfo.messageTags;
@@ -1057,9 +1038,7 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     if(!channelID)
         FMLogFirst(10, "Message has no known channel, using global emotes: %{public}@", describeChatMessage(self, tokens));
 
-    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = [emoteManager emoteNameRegistryForChannel:channelID];
-    logEmotesAcrossTokens(tokens, nameRegistry);
-    return substituteBTTVStringsWithEmoteTokens(tokens, nameRegistry);
+    return substituteBTTVStringsWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
 }
 
 %end
