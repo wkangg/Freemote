@@ -354,49 +354,89 @@ static BOOL isNull(id value) {
     return !value || value == [NSNull null];
 }
 
+// Marks that join onto the character before them, like U+034F, which chatters add to get around the duplicate message
+// check. Twitch splits VOD comments into words by grapheme, so one after a space or an emote glues the two together,
+// the emote's range doesn't match a word anymore and it stays text. They're invisible, so they're taken out there.
+static NSString *withoutJoinedMarks(NSString *text, BOOL afterEmote) {
+    NSCharacterSet *marks = [NSCharacterSet nonBaseCharacterSet];
+    if([text rangeOfCharacterFromSet:marks].location == NSNotFound)
+        return text;
+    NSMutableString *result = [[NSMutableString alloc] init];
+    BOOL strip = afterEmote;
+    for(NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
+        if(strip && [marks characterIsMember:c])
+            continue;
+        [result appendFormat:@"%C", c];
+        strip = c == ' ';
+    }
+    return result;
+}
+
 // VOD comment fragments: plain text has no emote or mention. Emotes say where they are in the message (in code
-// points, `to` inclusive), so offsets are counted over every fragment.
+// points, `to` inclusive), so offsets are counted over every fragment, as the text ends up after any is taken out.
 static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
     NSMutableArray *newFragments = [[NSMutableArray alloc] init];
     __block NSUInteger offset = 0;
+    __block BOOL afterEmote = NO;
     for(NSDictionary *fragment in fragments) {
         NSString *text = [fragment isKindOfClass:[NSDictionary class]] ? fragment[@"text"] : nil;
         if(![text isKindOfClass:[NSString class]]) {
             [newFragments addObject:fragment];
             continue;
         }
-        NSUInteger fragmentEnd = offset + codePointCount(text);
-        if(!isNull(fragment[@"emote"]) || !isNull(fragment[@"mention"])) {
+        NSUInteger length = codePointCount(text);
+        NSDictionary *emote = fragment[@"emote"];
+        if(!isNull(emote) || !isNull(fragment[@"mention"])) {
+            // Twitch's emotes move up by whatever was taken out before them (their ID has the position too)
+            if([emote isKindOfClass:[NSDictionary class]] && length && ![emote[@"from"] isEqual:@(offset)]) {
+                NSMutableDictionary *movedEmote = [emote mutableCopy];
+                movedEmote[@"from"] = @(offset);
+                movedEmote[@"to"] = @(offset + length - 1);
+                if([emote[@"emoteID"] isKindOfClass:[NSString class]])
+                    movedEmote[@"id"] = [NSString stringWithFormat:@"%@;%lu;%lu", emote[@"emoteID"], (unsigned long)offset, (unsigned long)(offset + length - 1)];
+                NSMutableDictionary *movedFragment = [fragment mutableCopy];
+                movedFragment[@"emote"] = movedEmote;
+                fragment = movedFragment;
+            }
             [newFragments addObject:fragment];
-            offset = fragmentEnd;
+            offset += length;
+            afterEmote = !isNull(emote);
             continue;
         }
 
         NSString *fragmentType = fragment[@"__typename"] ?: @"VideoCommentMessageFragment";
-        NSDictionary *previous = newFragments.lastObject;
-        BOOL afterEmote = [previous isKindOfClass:[NSDictionary class]] && !isNull(previous[@"emote"]);
-        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, afterEmote, ^(NSString *piece) {
-            [newFragments addObject:@{@"__typename": fragmentType, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
+        void (^addText)(NSString *) = ^(NSString *piece) {
+            piece = withoutJoinedMarks(piece, afterEmote);
+            if(piece.length)
+                [newFragments addObject:@{@"__typename": fragmentType, @"text": piece, @"emote": [NSNull null], @"mention": [NSNull null]}];
             offset += codePointCount(piece);
-        }, ^(NSString *name, NSString *emoteID) {
-            NSUInteger length = codePointCount(name);
+            afterEmote = NO;
+        };
+        BOOL foundEmote = splitTextAtEmotes(text, nameRegistry, afterEmote, addText, ^(NSString *name, NSString *emoteID) {
+            NSUInteger nameLength = codePointCount(name);
             // Apollo caches EmbeddedEmotes by ID, so it includes the position: with just the emote ID, every use of
             // the emote would share the from/to of whichever comment loaded last
-            NSString *embeddedID = [NSString stringWithFormat:@"%@;%lu;%lu", emoteID, (unsigned long)offset, (unsigned long)(offset + length - 1)];
+            NSString *embeddedID = [NSString stringWithFormat:@"%@;%lu;%lu", emoteID, (unsigned long)offset, (unsigned long)(offset + nameLength - 1)];
             [newFragments addObject:@{@"__typename": fragmentType, @"text": name, @"mention": [NSNull null], @"emote": @{
-                @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": embeddedID, @"setID": @"", @"from": @(offset), @"to": @(offset + length - 1)
+                @"__typename": @"EmbeddedEmote", @"emoteID": emoteID, @"id": embeddedID, @"setID": @"", @"from": @(offset), @"to": @(offset + nameLength - 1)
             }}];
-            offset += length;
+            offset += nameLength;
+            afterEmote = YES;
             (*emoteCount)++;
         });
-        // Offsets follow the split pieces, which leave out the space before a zero-width emote
         if(!foundEmote) {
-            [newFragments addObject:fragment];
-            offset = fragmentEnd;
+            NSString *cleanText = withoutJoinedMarks(text, afterEmote);
+            if([cleanText isEqualToString:text]) {
+                [newFragments addObject:fragment];
+                offset += length;
+                afterEmote = NO;
+            } else {
+                addText(text);
+            }
         }
     }
     return newFragments;
-
 }
 
 // Finds every comments { edges { node { message { messageFragments } } } } in a response
