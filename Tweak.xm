@@ -105,7 +105,16 @@ static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *n
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
 // afterEmote: the text comes right after an emote, which a zero-width emote at its start goes over.
 static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, BOOL afterEmote, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
-    NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
+    // Split at every space, even one a combining mark like U+034F follows: componentsSeparatedByString: doesn't, since
+    // it compares composed sequences, so "LOL \u034f" would stay one word
+    NSMutableArray<NSString *> *words = [[NSMutableArray alloc] init];
+    NSUInteger wordStart = 0;
+    for(NSUInteger i = 0; i <= text.length; i++) {
+        if(i == text.length || [text characterAtIndex:i] == ' ') {
+            [words addObject:[text substringWithRange:NSMakeRange(wordStart, i - wordStart)]];
+            wordStart = i + 1;
+        }
+    }
     NSMutableString *pendingText = [[NSMutableString alloc] init];
     BOOL foundEmote = NO, lastWasEmote = afterEmote;
     for(NSUInteger i = 0; i < words.count; i++) {
@@ -377,8 +386,8 @@ static BOOL isNull(id value) {
 }
 
 // Marks that join onto the character before them, like U+034F, which chatters add to get around the duplicate message
-// check. Twitch splits VOD comments into words by grapheme, so one after a space or an emote glues the two together,
-// the emote's range doesn't match a word anymore and it stays text. They're invisible, so they're taken out there.
+// check. After a space or an emote they'd glue the two into one composed sequence for anything that splits by those,
+// so they're taken out there: they're invisible anyway.
 static NSString *withoutJoinedMarks(NSString *text, BOOL afterEmote) {
     NSCharacterSet *marks = [NSCharacterSet nonBaseCharacterSet];
     if([text rangeOfCharacterFromSet:marks].location == NSNotFound)
@@ -459,7 +468,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
         }
     }
 
-    // Real messages never end in whitespace, and taking the marks out can leave some (in "LOL ͏")
+    // Real messages never end in whitespace, and taking the marks out can leave some (in "LOL \u034f")
     NSDictionary *last = newFragments.lastObject;
     if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && isNull(last[@"emote"]) && isNull(last[@"mention"])) {
         NSString *lastText = last[@"text"];
@@ -472,18 +481,6 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
         }
     }
 
-    // Diagnostics (temporary)
-    NSMutableString *before = [[NSMutableString alloc] init], *after = [[NSMutableString alloc] init];
-    for(NSDictionary *fragment in fragments)
-        if([fragment isKindOfClass:[NSDictionary class]] && [fragment[@"text"] isKindOfClass:[NSString class]])
-            [before appendString:fragment[@"text"]];
-    if([before rangeOfCharacterFromSet:[NSCharacterSet nonBaseCharacterSet]].location != NSNotFound) {
-        for(NSDictionary *fragment in newFragments) {
-            NSDictionary *emote = [fragment isKindOfClass:[NSDictionary class]] ? fragment[@"emote"] : nil;
-            [after appendFormat:@"[%@%@]", codePointsOf(fragment[@"text"]), [emote isKindOfClass:[NSDictionary class]] ? [NSString stringWithFormat:@" emote %@ %@-%@", emote[@"emoteID"], emote[@"from"], emote[@"to"]] : @""];
-        }
-        FMLogFirst(30, "VOD comment with joining marks: %{public}@ -> %{public}@", codePointsOf(before), after);
-    }
     return newFragments;
 }
 
@@ -1349,54 +1346,6 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
         FMLogFirst(5, "Emote at %lu takes %.1fpt", (unsigned long)characterIndex, bounds.size.width);
     }
     return bounds;
-}
-
-%end
-
-// Diagnostics (temporary): what each laid-out chat message has, to tell a missing emote token from one that isn't drawn
-static void logLaidOutMessage(NSLayoutManager *layoutManager) {
-    if(!MessageStringLayoutManager || ![layoutManager isKindOfClass:MessageStringLayoutManager])
-        return;
-    id messageString = swiftIvar(layoutManager, "messageString");
-    static NSHashTable *logged;
-    @synchronized([BTTVEmote class]) {
-        if(!logged)
-            logged = [NSHashTable weakObjectsHashTable];
-        if(!messageString || [logged containsObject:messageString])
-            return;
-        [logged addObject:messageString];
-    }
-    NSString *text = layoutManager.textStorage.string;
-    if([text rangeOfString:@"LOL"].location == NSNotFound)
-        return;
-    NSMutableArray<NSString *> *emotes = [[NSMutableArray alloc] init];
-    NSDictionary<NSNumber *, TWMessageEmoteToken *> *tokens = emoteTokens(messageString);
-    for(NSNumber *index in [tokens.allKeys sortedArrayUsingSelector:@selector(compare:)])
-        [emotes addObject:[NSString stringWithFormat:@"%@=%@", index, [tokens[index] respondsToSelector:@selector(emoteId)] ? tokens[index].emoteId : @"?"]];
-    NSMutableString *shown = [[NSMutableString alloc] init];
-    for(NSUInteger i = 0; i < text.length; i++) {
-        unichar c = [text characterAtIndex:i];
-        if(c == 0xFFFC)
-            [shown appendString:@"[img]"];
-        else if(c < 0x20 || c > 0x7E)
-            [shown appendFormat:@"<%04X>", c];
-        else
-            [shown appendFormat:@"%C", c];
-    }
-    FMLogFirst(100, "Laid out %{public}@: \"%{public}@\" emotes [%{public}@]", NSStringFromClass([messageString class]), shown,
-               [emotes componentsJoinedByString:@", "]);
-}
-
-%hook NSLayoutManager
-
-- (CGRect)usedRectForTextContainer:(NSTextContainer *)container {
-    logLaidOutMessage(self);
-    return %orig;
-}
-
-- (void)drawGlyphsForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
-    logLaidOutMessage(self);
-    %orig;
 }
 
 %end
