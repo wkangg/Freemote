@@ -1,4 +1,4 @@
-#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 // Kotlin/Native classes exported by KMPMobileChat.framework (Twitch 31.x chat)
 @interface KMPMCMessageTokenTextToken : NSObject
@@ -56,4 +56,9 @@
 // A React Native JS runtime (bridgeless). A segment is a JS file it evaluates.
 @interface RCTInstance : NSObject
 - (void)registerSegmentWithId:(NSNumber *)segmentId path:(NSString *)path;
+@end
+
+// Fabric's Text view
+@interface RCTParagraphComponentView : UIView
+@property (readonly) NSAttributedString *attributedText;
 @end

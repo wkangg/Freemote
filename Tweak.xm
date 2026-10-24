@@ -548,8 +548,8 @@ static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote
 
 // The emote whose card is open, if it's one of ours. Main thread only.
 static BTTVEmote *emoteCardEmote;
-// Its emoteDescription, for the React Native card, which is laid out off the main thread
-static NSString *emoteCardDescription; // @synchronized([BTTVEmote class])
+// The same, for the React Native card, which is laid out off the main thread
+static BTTVEmote *layoutEmoteCardEmote; // @synchronized([BTTVEmote class])
 
 // Our emote that an EmoteCard operation asks for, or nil
 static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
@@ -582,7 +582,7 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
     if(emote)
         FMLog("Holding back the emote card for %{public}@ (%{public}@)", emote.emoteText, emote.emoteID);
     @synchronized([BTTVEmote class]) {
-        emoteCardDescription = [emote emoteDescription];
+        layoutEmoteCardEmote = emote;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         emoteCardEmote = emote;
@@ -616,6 +616,16 @@ static id swiftIvar(id object, const char *name) {
 
 static char emoteCardLinkKey;
 
+// Twitch's link purple
+static UIColor *linkColor(void) {
+    return [UIColor colorWithRed:0xA9 / 255.0 green:0x70 / 255.0 blue:0xFF / 255.0 alpha:1];
+}
+
+// e.g. 7tv.app/emotes/<id>
+static NSString *pageURLText(NSURL *pageURL) {
+    return [pageURL.host stringByAppendingString:pageURL.path];
+}
+
 // The made-up card says "Twitch Global Emote": say where the emote is really from, and link to its page
 static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
     // Lazy Swift properties: nil until the card first uses them
@@ -641,11 +651,10 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
     NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
     paragraphStyle.alignment = subtitleLabel.textAlignment;
     UITextView *link = [[UITextView alloc] init];
-    link.attributedText = [[NSAttributedString alloc] initWithString:[pageURL.host stringByAppendingString:pageURL.path] attributes:@{
+    link.attributedText = [[NSAttributedString alloc] initWithString:pageURLText(pageURL) attributes:@{
         NSLinkAttributeName: pageURL, NSFontAttributeName: subtitleLabel.font, NSParagraphStyleAttributeName: paragraphStyle
     }];
-    // Twitch's link purple
-    link.linkTextAttributes = @{NSForegroundColorAttributeName: [UIColor colorWithRed:0xA9 / 255.0 green:0x70 / 255.0 blue:0xFF / 255.0 alpha:1]};
+    link.linkTextAttributes = @{NSForegroundColorAttributeName: linkColor()};
     link.editable = NO;
     link.scrollEnabled = NO;
     link.backgroundColor = [UIColor clearColor];
@@ -670,21 +679,79 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
 %end
 
 // The React Native stream screen's card is drawn by Fabric, whose text all goes through here (to measure and to draw), so
-// its "Twitch Global Emote" subtitle is swapped out. paragraphAttributes is a C++ struct, passed by pointer.
+// its "Twitch Global Emote" subtitle is swapped out, with the emote's page under it. paragraphAttributes is a C++ struct,
+// passed by pointer.
 %hook RCTTextLayoutManager
 
 - (NSTextStorage *)_textStorageAndLayoutManagerWithAttributesString:(NSAttributedString *)attributedString paragraphAttributes:(void *)paragraphAttributes size:(CGSize)size {
-    NSString *description;
+    BTTVEmote *emote;
     @synchronized([BTTVEmote class]) {
-        description = emoteCardDescription;
+        emote = layoutEmoteCardEmote;
     }
-    if(description && [attributedString.string isEqualToString:@"Twitch Global Emote"]) {
+    if(emote && [attributedString.string isEqualToString:@"Twitch Global Emote"]) {
         NSMutableAttributedString *newString = [attributedString mutableCopy];
-        [newString replaceCharactersInRange:NSMakeRange(0, newString.length) withString:description];
+        [newString replaceCharactersInRange:NSMakeRange(0, newString.length) withString:[emote emoteDescription]];
+        if(emote.pageURL) {
+            NSMutableDictionary *attributes = [[attributedString attributesAtIndex:0 effectiveRange:NULL] mutableCopy];
+            attributes[NSForegroundColorAttributeName] = linkColor();
+            [newString appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:pageURLText(emote.pageURL)] attributes:attributes]];
+        }
         attributedString = newString;
-        FMLogFirst(5, "Replaced the React Native emote card's subtitle with %{public}@", description);
+        FMLogFirst(5, "Replaced the React Native emote card's subtitle for %{public}@", emote.emoteText);
     }
     return %orig(attributedString, paragraphAttributes, size);
+}
+
+%end
+
+// attributedText is the text before the swap above. Fabric reuses its views for other text, so this is checked again
+// when tapped.
+static BOOL isEmoteCardSubtitle(UIView *view) {
+    return emoteCardEmote.pageURL && [view respondsToSelector:@selector(attributedText)]
+        && [((RCTParagraphComponentView *)view).attributedText.string isEqualToString:@"Twitch Global Emote"];
+}
+
+@interface FMEmoteCardLinkOpener : NSObject <UIGestureRecognizerDelegate>
+@end
+
+@implementation FMEmoteCardLinkOpener
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)recognizer {
+    return isEmoteCardSubtitle(recognizer.view);
+}
+
+- (void)open:(UITapGestureRecognizer *)recognizer {
+    if(isEmoteCardSubtitle(recognizer.view))
+        [[UIApplication sharedApplication] openURL:emoteCardEmote.pageURL options:@{} completionHandler:nil];
+}
+
+@end
+
+// Tapping the React Native card's subtitle opens the emote's page
+static void addEmoteCardLink(UIView *view) {
+    static FMEmoteCardLinkOpener *opener; // gesture recognizers don't keep their target or delegate
+    if(!view.window || !isEmoteCardSubtitle(view) || objc_getAssociatedObject(view, &emoteCardLinkKey))
+        return;
+    if(!opener)
+        opener = [[FMEmoteCardLinkOpener alloc] init];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:opener action:@selector(open:)];
+    tap.delegate = opener;
+    tap.cancelsTouchesInView = NO;
+    [view addGestureRecognizer:tap];
+    objc_setAssociatedObject(view, &emoteCardLinkKey, tap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    FMLog("Added a link to the React Native emote card for %{public}@", emoteCardEmote.emoteText);
+}
+
+%hook RCTParagraphComponentView
+
+- (void)didMoveToWindow {
+    %orig;
+    addEmoteCardLink((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    addEmoteCardLink((UIView *)self);
 }
 
 %end
