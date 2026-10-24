@@ -34,10 +34,6 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # The repo has an old prebuilt deb checked in; don't upload it alongside the new ones
-      - name: Remove committed packages
-        run: rm -rf packages
-
       - name: Build rootless deb
         run: make package
         env:
