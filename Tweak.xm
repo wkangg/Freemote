@@ -458,6 +458,32 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             }
         }
     }
+
+    // Real messages never end in whitespace, and taking the marks out can leave some (in "LOL ͏")
+    NSDictionary *last = newFragments.lastObject;
+    if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && isNull(last[@"emote"]) && isNull(last[@"mention"])) {
+        NSString *lastText = last[@"text"];
+        NSRange end = [lastText rangeOfCharacterFromSet:[NSCharacterSet whitespaceCharacterSet].invertedSet options:NSBackwardsSearch];
+        NSUInteger keep = end.location == NSNotFound ? 0 : NSMaxRange(end);
+        if(keep < lastText.length && (keep || newFragments.count > 1)) {
+            [newFragments removeLastObject];
+            if(keep)
+                [newFragments addObject:@{@"__typename": last[@"__typename"] ?: @"VideoCommentMessageFragment", @"text": [lastText substringToIndex:keep], @"emote": [NSNull null], @"mention": [NSNull null]}];
+        }
+    }
+
+    // Diagnostics (temporary)
+    NSMutableString *before = [[NSMutableString alloc] init], *after = [[NSMutableString alloc] init];
+    for(NSDictionary *fragment in fragments)
+        if([fragment isKindOfClass:[NSDictionary class]] && [fragment[@"text"] isKindOfClass:[NSString class]])
+            [before appendString:fragment[@"text"]];
+    if([before rangeOfCharacterFromSet:[NSCharacterSet nonBaseCharacterSet]].location != NSNotFound) {
+        for(NSDictionary *fragment in newFragments) {
+            NSDictionary *emote = [fragment isKindOfClass:[NSDictionary class]] ? fragment[@"emote"] : nil;
+            [after appendFormat:@"[%@%@]", codePointsOf(fragment[@"text"]), [emote isKindOfClass:[NSDictionary class]] ? [NSString stringWithFormat:@" emote %@ %@-%@", emote[@"emoteID"], emote[@"from"], emote[@"to"]] : @""];
+        }
+        FMLogFirst(30, "VOD comment with joining marks: %{public}@ -> %{public}@", codePointsOf(before), after);
+    }
     return newFragments;
 }
 
@@ -1323,6 +1349,54 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
         FMLogFirst(5, "Emote at %lu takes %.1fpt", (unsigned long)characterIndex, bounds.size.width);
     }
     return bounds;
+}
+
+%end
+
+// Diagnostics (temporary): what each laid-out chat message has, to tell a missing emote token from one that isn't drawn
+static void logLaidOutMessage(NSLayoutManager *layoutManager) {
+    if(!MessageStringLayoutManager || ![layoutManager isKindOfClass:MessageStringLayoutManager])
+        return;
+    id messageString = swiftIvar(layoutManager, "messageString");
+    static NSHashTable *logged;
+    @synchronized([BTTVEmote class]) {
+        if(!logged)
+            logged = [NSHashTable weakObjectsHashTable];
+        if(!messageString || [logged containsObject:messageString])
+            return;
+        [logged addObject:messageString];
+    }
+    NSString *text = layoutManager.textStorage.string;
+    if([text rangeOfString:@"LOL"].location == NSNotFound)
+        return;
+    NSMutableArray<NSString *> *emotes = [[NSMutableArray alloc] init];
+    NSDictionary<NSNumber *, TWMessageEmoteToken *> *tokens = emoteTokens(messageString);
+    for(NSNumber *index in [tokens.allKeys sortedArrayUsingSelector:@selector(compare:)])
+        [emotes addObject:[NSString stringWithFormat:@"%@=%@", index, [tokens[index] respondsToSelector:@selector(emoteId)] ? tokens[index].emoteId : @"?"]];
+    NSMutableString *shown = [[NSMutableString alloc] init];
+    for(NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
+        if(c == 0xFFFC)
+            [shown appendString:@"[img]"];
+        else if(c < 0x20 || c > 0x7E)
+            [shown appendFormat:@"<%04X>", c];
+        else
+            [shown appendFormat:@"%C", c];
+    }
+    FMLogFirst(100, "Laid out %{public}@: \"%{public}@\" emotes [%{public}@]", NSStringFromClass([messageString class]), shown,
+               [emotes componentsJoinedByString:@", "]);
+}
+
+%hook NSLayoutManager
+
+- (CGRect)usedRectForTextContainer:(NSTextContainer *)container {
+    logLaidOutMessage(self);
+    return %orig;
+}
+
+- (void)drawGlyphsForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+    logLaidOutMessage(self);
+    %orig;
 }
 
 %end
