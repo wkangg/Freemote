@@ -401,7 +401,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
     NSMutableArray *newFragments = [[NSMutableArray alloc] init];
     __block NSUInteger offset = 0;
     __block BOOL afterEmote = NO;
-    for(NSDictionary *fragment in fragments) {
+    for(__strong NSDictionary *fragment in fragments) {
         NSString *text = [fragment isKindOfClass:[NSDictionary class]] ? fragment[@"text"] : nil;
         if(![text isKindOfClass:[NSString class]]) {
             [newFragments addObject:fragment];
