@@ -11,8 +11,8 @@
 - (instancetype)initWithText:(NSString *)text id:(NSString *)emoteID;
 @end
 
-// Also has an `id` getter (the message ID), called through objc_msgSend
 @interface KMPMCChatMessageInfo : NSObject
+@property (readonly) NSString *id; // the message ID
 @property (readonly) NSArray *tokens;
 @property (readonly) NSDictionary *messageTags;
 @property (readonly) NSString *messageType;

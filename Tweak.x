@@ -4,7 +4,6 @@
 #import "FMLog.h"
 #import "FMReactNativePatch.h"
 #import <objc/runtime.h>
-#import <objc/message.h>
 #import <mach/mach.h>
 
 
@@ -1003,8 +1002,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
 #pragma mark - Live chat
 
 static NSString *chatMessageID(KMPMCChatMessageInfo *messageInfo) {
-    // `id` can't be declared as a property, so call the getter directly
-    NSString *messageID = ((id (*)(id, SEL))objc_msgSend)(messageInfo, sel_registerName("id"));
+    NSString *messageID = messageInfo.id;
     return [messageID isKindOfClass:[NSString class]] && messageID.length ? messageID : nil;
 }
 
@@ -1248,7 +1246,7 @@ static void hookKMPIfNeeded(void) {
         [MessagesReceived class];
 
         if(class_getInstanceMethod(messageInfo, @selector(tokens))
-           && class_getInstanceMethod(messageInfo, sel_registerName("id"))
+           && class_getInstanceMethod(messageInfo, @selector(id))
            && class_getInstanceMethod(chatEvent, @selector(event))
            && class_getInstanceMethod(chatEvent, @selector(channelName))
            && class_getInstanceMethod(liveMessage, @selector(messageInfo))
