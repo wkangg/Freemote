@@ -607,8 +607,6 @@ static id swiftIvar(id object, const char *name) {
     return ivar ? object_getIvar(object, ivar) : nil;
 }
 
-static char emoteCardLinkKey;
-
 // Twitch's link purple
 static UIColor *linkColor(void) {
     return [UIColor colorWithRed:0xA9 / 255.0 green:0x70 / 255.0 blue:0xFF / 255.0 alpha:1];
@@ -620,7 +618,7 @@ static NSString *pageURLText(NSURL *pageURL) {
 }
 
 // The made-up card says "Twitch Global Emote": say where the emote is really from, and link to its page
-static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
+static void updateEmoteCardTitle(EmoteCardTitleView *titleView, BTTVEmote *emote) {
     // Lazy Swift properties: nil until the card first uses them
     UITextView *titleTextView = swiftIvar(titleView, "$__lazy_storage_$_titleTextView");
     UILabel *subtitleLabel = swiftIvar(titleView, "$__lazy_storage_$_subtitleLabel");
@@ -637,7 +635,7 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
         subtitleLabel.hidden = NO;
     }
 
-    if(!emote.pageURL || objc_getAssociatedObject(titleView, &emoteCardLinkKey))
+    if(!emote.pageURL || titleView.freemote_emoteCardLink)
         return;
     // A text view opens its links when tapped, like a link in chat
     NSURL *pageURL = emote.pageURL;
@@ -656,17 +654,19 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
     link.textContainer.maximumNumberOfLines = 1;
     link.textContainer.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [labelsStackView addArrangedSubview:link];
-    objc_setAssociatedObject(titleView, &emoteCardLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    titleView.freemote_emoteCardLink = link;
     FMLog("Added details to the emote card for %{public}@", emote.emoteText);
 }
 
 %hook EmoteCardTitleView
 
+%property (nonatomic, strong) UITextView *freemote_emoteCardLink;
+
 // The card fills in its labels after the view is created, so check whenever it lays out
 - (void)layoutSubviews {
     %orig;
     if(emoteCardEmote)
-        updateEmoteCardTitle((UIView *)self, emoteCardEmote);
+        updateEmoteCardTitle(self, emoteCardEmote);
 }
 
 %end
@@ -699,9 +699,9 @@ static void updateEmoteCardTitle(UIView *titleView, BTTVEmote *emote) {
 
 // attributedText is the text before the swap above. Fabric reuses its views for other text, so this is checked again
 // when tapped.
-static BOOL isEmoteCardSubtitle(UIView *view) {
+static BOOL isEmoteCardSubtitle(RCTParagraphComponentView *view) {
     return emoteCardEmote.pageURL && [view respondsToSelector:@selector(attributedText)]
-        && [((RCTParagraphComponentView *)view).attributedText.string isEqualToString:@"Twitch Global Emote"];
+        && [view.attributedText.string isEqualToString:@"Twitch Global Emote"];
 }
 
 @interface FMEmoteCardLinkOpener : NSObject <UIGestureRecognizerDelegate>
@@ -710,20 +710,20 @@ static BOOL isEmoteCardSubtitle(UIView *view) {
 @implementation FMEmoteCardLinkOpener
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)recognizer {
-    return isEmoteCardSubtitle(recognizer.view);
+    return isEmoteCardSubtitle((RCTParagraphComponentView *)recognizer.view);
 }
 
 - (void)open:(UITapGestureRecognizer *)recognizer {
-    if(isEmoteCardSubtitle(recognizer.view))
+    if(isEmoteCardSubtitle((RCTParagraphComponentView *)recognizer.view))
         [[UIApplication sharedApplication] openURL:emoteCardEmote.pageURL options:@{} completionHandler:nil];
 }
 
 @end
 
 // Tapping the React Native card's subtitle opens the emote's page
-static void addEmoteCardLink(UIView *view) {
+static void addEmoteCardLink(RCTParagraphComponentView *view) {
     static FMEmoteCardLinkOpener *opener; // gesture recognizers don't keep their target or delegate
-    if(!view.window || !isEmoteCardSubtitle(view) || objc_getAssociatedObject(view, &emoteCardLinkKey))
+    if(!view.window || !isEmoteCardSubtitle(view) || view.freemote_emoteCardLinkTap)
         return;
     if(!opener)
         opener = [[FMEmoteCardLinkOpener alloc] init];
@@ -731,20 +731,22 @@ static void addEmoteCardLink(UIView *view) {
     tap.delegate = opener;
     tap.cancelsTouchesInView = NO;
     [view addGestureRecognizer:tap];
-    objc_setAssociatedObject(view, &emoteCardLinkKey, tap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    view.freemote_emoteCardLinkTap = tap;
     FMLog("Added a link to the React Native emote card for %{public}@", emoteCardEmote.emoteText);
 }
 
 %hook RCTParagraphComponentView
 
+%property (nonatomic, strong) UITapGestureRecognizer *freemote_emoteCardLinkTap;
+
 - (void)didMoveToWindow {
     %orig;
-    addEmoteCardLink((UIView *)self);
+    addEmoteCardLink(self);
 }
 
 - (void)layoutSubviews {
     %orig;
-    addEmoteCardLink((UIView *)self);
+    addEmoteCardLink(self);
 }
 
 %end

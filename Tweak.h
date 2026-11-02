@@ -61,4 +61,10 @@
 // Fabric's Text view
 @interface RCTParagraphComponentView : UIView
 @property (readonly) NSAttributedString *attributedText;
+@property (nonatomic, strong) UITapGestureRecognizer *freemote_emoteCardLinkTap; // %property
+@end
+
+// The title of the native emote card (Twitch.EmoteCardTitleView)
+@interface EmoteCardTitleView : UIView
+@property (nonatomic, strong) UITextView *freemote_emoteCardLink; // %property
 @end
