@@ -11,7 +11,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = Freemote
 
-Freemote_FILES = Tweak.xm $(wildcard *.m)
+Freemote_FILES = Tweak.x $(wildcard *.m)
 Freemote_CFLAGS = -fobjc-arc
 Freemote_FRAMEWORKS = UIKit
 Freemote_LOGOS_DEFAULT_GENERATOR = internal
