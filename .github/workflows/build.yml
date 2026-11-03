@@ -25,7 +25,8 @@ jobs:
         id: package_info
         run: |
           echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          echo "version=$(grep "Version:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+          # Must match PACKAGE_VERSION in the Makefile
+          echo "version=$(grep "Version:" control | cut -d' ' -f2)+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Theos cache key
         run: echo "theos_heads=$(git ls-remote https://github.com/theos/theos HEAD | cut -f 1)-$(git ls-remote https://github.com/theos/sdks HEAD | cut -f 1)" >> $GITHUB_ENV
@@ -42,10 +43,13 @@ jobs:
       - name: Build rootless deb
         run: make package
         env:
+          FINALPACKAGE: 1
           THEOS_PACKAGE_SCHEME: rootless
 
       - name: Build rootful deb
         run: make clean package
+        env:
+          FINALPACKAGE: 1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -65,7 +69,8 @@ jobs:
         id: package_info
         run: |
           echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          echo "version=$(grep "Version:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+          # Must match PACKAGE_VERSION in the Makefile
+          echo "version=$(grep "Version:" control | cut -d' ' -f2)+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: |

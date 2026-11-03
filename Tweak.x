@@ -1463,6 +1463,7 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
 %end
 
 %ctor {
+    FMLog("Freemote %{public}s loaded in Twitch %{public}@", FREEMOTE_VERSION, NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]);
     emoteManager = [[FMEmoteManager alloc] init];
     hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);

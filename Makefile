@@ -11,8 +11,12 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = Freemote
 
+# Tag the control file's version with the commit, e.g. 1.0.0+d1311b9 (used for both the deb and the IPA)
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
+PACKAGE_VERSION := $(shell grep -i '^Version:' control | cut -d' ' -f2)$(if $(GIT_COMMIT),+$(GIT_COMMIT))
+
 Freemote_FILES = Tweak.x $(wildcard *.m)
-Freemote_CFLAGS = -fobjc-arc
+Freemote_CFLAGS = -fobjc-arc -DFREEMOTE_VERSION='"$(PACKAGE_VERSION)"'
 Freemote_FRAMEWORKS = UIKit
 Freemote_LOGOS_DEFAULT_GENERATOR = internal
 ifeq ($(SIDELOADED),1)
