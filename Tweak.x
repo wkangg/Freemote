@@ -14,8 +14,9 @@
 // Any number: the React Native segment our JS patch runs as
 #define FMReactNativeSegmentID 0x46524D
 
-// How long a chat history response is held back waiting for the channel's emotes
-#define FMHistoryEmoteTimeout 5
+// How long a VOD chat response is held back waiting for the channel's emotes. Live chat history isn't: it gets the
+// emotes that are in by then, and the React Native chat adds the rest as they load.
+#define FMVideoEmoteTimeout 5
 
 static Class EmoteToken, TextToken, MessagesReceived;
 static FMEmoteManager *emoteManager;
@@ -262,19 +263,6 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
     });
 }
 
-static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *channelID) {
-    if(![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("Chat history for channel %{public}@ is waiting for its emotes", channelID);
-        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
-        loadChannelEmotes(channelID, ^{
-            dispatch_semaphore_signal(loaded);
-        });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for channel %{public}@ chat history", channelID);
-    }
-    return [emoteManager emoteNameRegistryForChannel:channelID];
-}
-
 static NSDictionary<NSString *, BTTVEmote *> *waitForVideoEmotes(NSString *videoID) {
     NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
     if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
@@ -283,7 +271,7 @@ static NSDictionary<NSString *, BTTVEmote *> *waitForVideoEmotes(NSString *video
         loadVideoEmotes(videoID, ^{
             dispatch_semaphore_signal(loaded);
         });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
+        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMVideoEmoteTimeout * NSEC_PER_SEC)))
             FMLog("Timed out loading emotes for video %{public}@ chat", videoID);
         channelID = [channelIDsByVideoID objectForKey:videoID];
     }
@@ -376,9 +364,9 @@ static void addEmotesToChatHistory(id json) {
 
     NSArray *messages = json[@"recentChatMessages"];
     if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
-        NSDate *start = [NSDate date];
-        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForChannelEmotes(json[@"id"]);
-        NSTimeInterval waited = -start.timeIntervalSinceNow;
+        // Not waited for: whatever's in so far (globals at least, once they're in)
+        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = [emoteManager emoteNameRegistryForChannel:json[@"id"]];
+        BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
         NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
@@ -395,8 +383,8 @@ static void addEmotesToChatHistory(id json) {
                 withoutFragments++;
         }
         // Many messages without fragments means the response shape changed
-        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, waited %.1fs)",
-              json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, waited);
+        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, %{public}s)",
+              json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, loaded ? "all loaded" : "still loading");
         return;
     }
 
