@@ -5,6 +5,7 @@
 #import "FMReactNativePatch.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
+#import <dlfcn.h>
 
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
@@ -981,6 +982,57 @@ static NSString *ircLineWithEmotes(NSString *line) {
 
 %end
 
+// A message that comes in before its channel's emotes is drawn without them, so our JS patch takes each channel's
+// emote names (name -> our emote ID) as they load, and its chat rows add the ones their message is missing. It
+// registers a callable module for that; calling one that isn't registered is a fatal JS error, so nothing is sent
+// until the patch logs that it's ready.
+static __weak RCTInstance *reactInstance;
+static atomic_bool reactNativeReadyForEmotes;
+static dispatch_queue_t reactNativeEmoteQueue; // serial, so a channel's last table sent is its newest
+
+#define FMReactNativeReadyMessage @"[Freemote] Ready for emote tables"
+
+// Only on reactNativeEmoteQueue
+static void sendEmoteTableNow(NSString *channelID) {
+    RCTInstance *instance = reactInstance;
+    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = emoteManager.channelNameRegistries[channelID];
+    if(!atomic_load(&reactNativeReadyForEmotes) || !instance || !nameRegistry)
+        return;
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionaryWithCapacity:nameRegistry.count];
+    [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, BTTVEmote *emote, BOOL *stop) {
+        names[name] = freemoteEmoteID(emote);
+    }];
+    [instance callFunctionOnJSModule:@"Freemote" method:@"setEmotes" args:@[channelID, names]];
+    FMLogFirst(10, "Sent %lu emote names for channel %{public}@ to React Native", (unsigned long)names.count, channelID);
+}
+
+static void sendEmoteTable(NSString *channelID) {
+    dispatch_async(reactNativeEmoteQueue, ^{
+        sendEmoteTableNow(channelID);
+    });
+}
+
+// React Native passes the JS's log lines to its log functions
+static void watchForReactNativeReady(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void (*addLogFunction)(RCTLogFunction) = (void (*)(RCTLogFunction))dlsym(RTLD_DEFAULT, "RCTAddLogFunction");
+        if(!addLogFunction) {
+            FMLog("No RCTAddLogFunction, React Native messages from before emotes load stay as text");
+            return;
+        }
+        addLogFunction(^(NSInteger level, NSInteger source, NSString *fileName, NSNumber *lineNumber, NSString *message) {
+            if(![message isKindOfClass:[NSString class]] || ![message hasSuffix:FMReactNativeReadyMessage])
+                return;
+            atomic_store(&reactNativeReadyForEmotes, true);
+            dispatch_async(reactNativeEmoteQueue, ^{
+                for(NSString *channelID in emoteManager.channelNameRegistries)
+                    sendEmoteTableNow(channelID);
+            });
+        });
+    });
+}
+
 // The React Native screen draws each emote as a square in its JS, so a JS patch makes ours wide. A registered segment
 // is evaluated on the JS thread's queue, and the bundle gets queued from here, so the patch runs before the bundle.
 %hook RCTInstance
@@ -993,8 +1045,16 @@ static NSString *ircLineWithEmotes(NSString *line) {
     else if(![FMReactNativePatchSource writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
         FMLog("Couldn't write the React Native patch, emotes stay square: %{public}@", error.localizedDescription);
     else {
+        // A new runtime: wait for its patch to say it's ready
+        atomic_store(&reactNativeReadyForEmotes, false);
+        if([self respondsToSelector:@selector(callFunctionOnJSModule:method:args:)]) {
+            reactInstance = self;
+            watchForReactNativeReady();
+        } else {
+            FMLog("RCTInstance changed, React Native messages from before emotes load stay as text");
+        }
         [self registerSegmentWithId:@(FMReactNativeSegmentID) path:path];
-        FMLog("Registered the React Native emote size patch");
+        FMLog("Registered the React Native patch");
     }
     %orig;
 }
@@ -1467,6 +1527,10 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     emoteManager = [[FMEmoteManager alloc] init];
     hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
+    reactNativeEmoteQueue = dispatch_queue_create("com.gilesgc.freemote.react-native-emotes", DISPATCH_QUEUE_SERIAL);
+    emoteManager.channelEmotesChanged = ^(NSString *channelID) {
+        sendEmoteTable(channelID);
+    };
     chatHistoryOperations = [NSSet setWithArray:@[@"ChatHistory", @"TheaterPortalPreload", @"VideoCommentsByContentOffset", @"VideoCommentsByCursor"]];
     channelIDsByName = [[NSMutableDictionary alloc] init];
     channelIDsByMessageID = [[NSCache alloc] init];

@@ -7,6 +7,8 @@
 @property (atomic, copy) NSDictionary<NSString *, BTTVEmote *> *emoteRegistry; // every loaded emote, by ID
 @property (atomic, copy) NSDictionary<NSString *, NSDictionary<NSString *, BTTVEmote *> *> *channelNameRegistries; // channel ID -> name -> emote, globals included
 @property (atomic, copy) NSDictionary<NSString *, BTTVEmote *> *globalNameRegistry;
+// Called on a background thread each time more of a channel's emotes are in
+@property (atomic, copy) void (^channelEmotesChanged)(NSString *channelID);
 
 // Blocks on network requests, don't call on the main thread. Each provider's emotes are usable as soon as its
 // request finishes, before this returns.

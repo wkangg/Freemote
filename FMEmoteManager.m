@@ -42,6 +42,9 @@
                 lists[index] = emotes;
                 [self publishEmotes:emotes channelID:channelID globals:needsGlobals ? nil : knownGlobals globalLists:globalLists channelLists:channelLists];
             }
+            void (^channelEmotesChanged)(NSString *) = self.channelEmotesChanged;
+            if(emotes.count && channelEmotesChanged)
+                channelEmotesChanged(channelID);
         });
     };
     if(needsGlobals) {

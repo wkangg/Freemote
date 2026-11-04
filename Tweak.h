@@ -56,7 +56,12 @@
 // A React Native JS runtime (bridgeless). A segment is a JS file it evaluates.
 @interface RCTInstance : NSObject
 - (void)registerSegmentWithId:(NSNumber *)segmentId path:(NSString *)path;
+// Calls a method of a module the JS registered with RN$registerCallableModule, once the bundle has loaded
+- (void)callFunctionOnJSModule:(NSString *)moduleName method:(NSString *)method args:(NSArray *)args;
 @end
+
+// React Native's log function (RCTLog.h): level and source are the RCTLogLevel and RCTLogSource enums
+typedef void (^RCTLogFunction)(NSInteger level, NSInteger source, NSString *fileName, NSNumber *lineNumber, NSString *message);
 
 // Fabric's Text view
 @interface RCTParagraphComponentView : UIView
