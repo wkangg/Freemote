@@ -87,6 +87,10 @@
         if(needsGlobals)
             [self addFFZSizes:ffzGlobalSets toRegistry:registry];
         [self addFFZSizes:ffzRoom toRegistry:registry];
+        // Our emote IDs carry the width, so the channel's names are sent again with the new ones
+        void (^channelEmotesChanged)(NSString *) = self.channelEmotesChanged;
+        if(channelEmotesChanged)
+            channelEmotesChanged(channelID);
     });
 }
 
