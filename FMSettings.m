@@ -4,6 +4,7 @@ NSString *const FMBTTVEnabledKey = @"FreemoteBTTVEnabled";
 NSString *const FMFFZEnabledKey = @"FreemoteFFZEnabled";
 NSString *const FMSevenTVEnabledKey = @"FreemoteSevenTVEnabled";
 NSString *const FMKeepDeletedMessagesKey = @"FreemoteKeepDeletedMessages";
+NSString *const FMClaimChannelPointsKey = @"FreemoteClaimChannelPoints";
 
 void FMRegisterDefaults(void) {
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
@@ -11,6 +12,7 @@ void FMRegisterDefaults(void) {
         FMFFZEnabledKey: @YES,
         FMSevenTVEnabledKey: @YES,
         FMKeepDeletedMessagesKey: @YES,
+        FMClaimChannelPointsKey: @YES,
     }];
 }
 
@@ -24,6 +26,7 @@ void FMRegisterDefaults(void) {
     _sections = @[
         @[@[@"BTTV Emotes", FMBTTVEnabledKey], @[@"FFZ Emotes", FMFFZEnabledKey], @[@"7TV Emotes", FMSevenTVEnabledKey]],
         @[@[@"Keep Deleted Messages", FMKeepDeletedMessagesKey]],
+        @[@[@"Claim Channel Points Bonus", FMClaimChannelPointsKey]],
     ];
 }
 
@@ -51,8 +54,10 @@ void FMRegisterDefaults(void) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if(section == 0)
         return @"Emotes from each provider, global and per channel.";
-    return @"Messages deleted by a moderator stay in chat, dimmed, on the React Native stream screen.\n\n"
-           @"Changes apply after restarting Twitch.\n\nFreemote " FREEMOTE_VERSION;
+    if(section == 1)
+        return @"Messages deleted by a moderator stay in chat, dimmed, on the React Native stream screen.";
+    return @"Claims the bonus chest as soon as it shows up, in any chat you have open.\n\n"
+           @"Emote and deleted message changes apply after restarting Twitch.\n\nFreemote " FREEMOTE_VERSION;
 }
 
 - (void)toggled:(UISwitch *)toggle {

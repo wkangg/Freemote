@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "Tweak.h"
+#import "FMChannelPoints.h"
 #import "FMEmoteManager.h"
 #import "FMLog.h"
 #import "FMReactNativePatch.h"
@@ -918,6 +919,7 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    FMChannelPointsNoteRequest(task.originalRequest, session, YES);
     // Nothing adds emotes to native chat history later, so it waits for them
     NSData *data = finishHeldResponse(task, error, YES);
     if(data.length)
@@ -947,6 +949,7 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    FMChannelPointsNoteRequest(task.originalRequest, session, NO);
     // The React Native chat rows add emotes that load later
     NSData *data = finishHeldResponse(task, error, NO);
     if(data.length)
@@ -1038,6 +1041,8 @@ static NSString *ircLineWithEmotes(NSString *line) {
             FMLog("React Native chat joined channel %{public}@", channelID);
         loadChannelEmotes(channelID, nil);
     }
+    if([command isEqualToString:@"ROOMSTATE"])
+        FMChannelPointsCheckChannel(channelID);
     if(![command isEqualToString:@"PRIVMSG"] && ![command isEqualToString:@"USERNOTICE"])
         return line;
 
@@ -1072,8 +1077,28 @@ static NSString *ircLineWithEmotes(NSString *line) {
         for(NSUInteger i = 0; i < lines.count; i++)
             lines[i] = ircLineWithEmotes(lines[i]);
         message = [lines componentsJoinedByString:@"\r\n"];
+    } else if([url.host isEqualToString:@"hermes.twitch.tv"]) {
+        // Channel points bonuses
+        FMChannelPointsHandleMessage(message);
     }
     %orig(webSocket, message);
+}
+
+%end
+
+// Native Hermes (Twitch.HermesWebSocket) is a URLSessionWebSocketTask, whose messages come through here
+%hook NSURLSessionWebSocketTask
+
+- (void)receiveMessageWithCompletionHandler:(void (^)(NSURLSessionWebSocketMessage *message, NSError *error))completionHandler {
+    if(!completionHandler || ![self.originalRequest.URL.host isEqualToString:@"hermes.twitch.tv"]) {
+        %orig;
+        return;
+    }
+    %orig(^(NSURLSessionWebSocketMessage *message, NSError *error) {
+        if(message.type == NSURLSessionWebSocketMessageTypeString)
+            FMChannelPointsHandleMessage(message.string);
+        completionHandler(message, error);
+    });
 }
 
 %end
@@ -1435,8 +1460,10 @@ static void joinedChannel(id channelID) {
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
     FMLog("Joined channel %{public}@", channel);
-    if(isChannelID(channel))
+    if(isChannelID(channel)) {
         loadChannelEmotes(channel, nil);
+        FMChannelPointsCheckChannel(channel);
+    }
 }
 
 // KMPMobileChat calls into these Swift repositories (through ObjC) when it joins a channel's chat
@@ -1646,5 +1673,5 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     channelIDsByVideoID = [[NSCache alloc] init];
     channelIDsByNonce = [[NSCache alloc] init];
     channelIDsByNonce.countLimit = 100;
-    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"));
+    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"), NSURLSessionWebSocketTask = objc_getClass("__NSURLSessionWebSocketTask") ?: [NSURLSessionWebSocketTask class]);
 }
