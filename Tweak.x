@@ -1311,7 +1311,8 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
 // means it's swapped for a MessageDeleted with an empty ID, which Swift does nothing with.
 static Class MessageDeleted, UserMessagesCleared, MessagesCleared, MessageStringViewClass, MessageStringLayerClass;
 static NSCache<NSString *, NSNumber *> *deletedMessageIDs;
-static NSMutableDictionary<NSString *, NSDate *> *userClearDates; // user ID -> when their messages were cleared, @synchronized
+// User ID -> channel ID ("" if unknown) -> when their messages were cleared there. @synchronized
+static NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSDate *> *> *userClearDates;
 static atomic_bool keptDeletedMessages; // whether anything is dimmed at all
 
 #define FMDeletedMessageAlpha 0.45
@@ -1341,7 +1342,7 @@ static void refreshDeletedMessages(void) {
     });
 }
 
-static id eventKeepingMessages(id event) {
+static id eventKeepingMessages(id event, NSString *channelName) {
     if(![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
         return event;
     if(MessageDeleted && [event isKindOfClass:MessageDeleted]) {
@@ -1359,8 +1360,17 @@ static id eventKeepingMessages(id event) {
         NSString *userID = ((KMPMCChannelEventChatChannelUserMessagesCleared *)event).clearUserId;
         if(![userID isKindOfClass:[NSString class]] || !userID.length)
             return event;
+        NSString *channelID, *name = channelKey(channelName);
+        @synchronized(channelIDsByName) {
+            channelID = name ? channelIDsByName[name] : nil;
+        }
         @synchronized(userClearDates) {
-            userClearDates[userID] = [NSDate date];
+            if(userClearDates.count > 5000)
+                [userClearDates removeAllObjects];
+            NSMutableDictionary<NSString *, NSDate *> *dates = userClearDates[userID];
+            if(!dates)
+                userClearDates[userID] = dates = [[NSMutableDictionary alloc] init];
+            dates[channelID ?: @""] = [NSDate date];
         }
         atomic_store(&keptDeletedMessages, true);
         FMLogFirst(1, "Kept a timed out or banned user's messages in native chat");
@@ -1383,9 +1393,16 @@ static BOOL isDeletedMessage(TWChatMessage *message) {
     id senderID = message.senderId;
     if(!senderID)
         return NO;
+    // Only a timeout or ban in the message's own channel, when it's known (live messages)
+    NSString *channelID = [messageID isKindOfClass:[NSString class]] ? [channelIDsByMessageID objectForKey:messageID] : nil;
     NSDate *cleared;
     @synchronized(userClearDates) {
-        cleared = userClearDates[[NSString stringWithFormat:@"%@", senderID]];
+        NSDictionary<NSString *, NSDate *> *dates = userClearDates[[NSString stringWithFormat:@"%@", senderID]];
+        if(channelID)
+            cleared = dates[channelID] ?: dates[@""];
+        else
+            for(NSDate *date in dates.allValues)
+                cleared = !cleared || [date compare:cleared] == NSOrderedDescending ? date : cleared;
     }
     // Only what they sent before it (with a second for the server's clock), not after a timeout runs out
     NSDate *sent = message.date;
@@ -1425,7 +1442,7 @@ static void dimIfDeleted(MessageStringView *view) {
 - (id)event {
     id event = %orig;
     logChatEventType(event, self.channelName);
-    event = eventKeepingMessages(event);
+    event = eventKeepingMessages(event, self.channelName);
     if(![event isKindOfClass:MessagesReceived])
         return event;
 
