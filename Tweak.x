@@ -660,14 +660,14 @@ static UITableViewCell *settingsCell(void) {
 
 %new(B@:@@)
 - (BOOL)freemote_isSettingsRow:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
-    return indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 && indexPath.row == self.freemote_settingsRow;
+    return indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 && indexPath.row == [self freemote_settingsRow];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger rows = %orig;
     if(forwardingAccountMenuCall || section != [self numberOfSectionsInTableView:tableView] - 1)
         return rows;
-    self.freemote_settingsRow = rows;
+    [self setFreemote_settingsRow:rows];
     return rows + 1;
 }
 
@@ -692,7 +692,7 @@ static UITableViewCell *settingsCell(void) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if([self freemote_isSettingsRow:indexPath tableView:tableView]) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [self.navigationController pushViewController:[[FMSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];
+        [[self navigationController] pushViewController:[[FMSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];
         return;
     }
     forwardingAccountMenuCall = YES;
@@ -1090,7 +1090,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
 %hook NSURLSessionWebSocketTask
 
 - (void)receiveMessageWithCompletionHandler:(void (^)(NSURLSessionWebSocketMessage *message, NSError *error))completionHandler {
-    if(!completionHandler || ![self.originalRequest.URL.host isEqualToString:@"hermes.twitch.tv"]) {
+    if(!completionHandler || ![[self originalRequest].URL.host isEqualToString:@"hermes.twitch.tv"]) {
         %orig;
         return;
     }

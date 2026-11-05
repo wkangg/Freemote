@@ -87,8 +87,11 @@ static NSDictionary<NSString *, id> *claimHeaders(void) {
     return nativeHeaders ?: reactHeaders;
 }
 
+// How long to wait before trying a claim that didn't get through once more: Hermes won't say it's there again
+#define FMClaimRetryDelay 5
+
 // Only on pointsQueue
-static void claim(NSString *channelID, NSString *claimID) {
+static void claim(NSString *channelID, NSString *claimID, BOOL retry) {
     if(!claimingEnabled() || [claimIDs containsObject:claimID])
         return;
     NSDictionary *headers = claimHeaders();
@@ -106,6 +109,11 @@ static void claim(NSString *channelID, NSString *claimID) {
         if(![result isKindOfClass:[NSDictionary class]]) {
             // Didn't get through: it can be tried again
             [claimIDs removeObject:claimID];
+            if(retry) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, FMClaimRetryDelay * NSEC_PER_SEC), pointsQueue(), ^{
+                    claim(channelID, claimID, NO);
+                });
+            }
             return;
         }
         if(errorCode && errorCode != [NSNull null])
@@ -131,7 +139,7 @@ static void checkChannel(NSString *channelID) {
     sendGQL(headers, @"ChannelPoints", FMChannelPointsHash, FMChannelPointsQuery, @{@"channel": channelID, @"includeSettings": @NO, @"includeUserInfo": @YES}, ^(NSDictionary *data) {
         NSString *claimID = valueAt(data, @[@"user", @"channel", @"selfView", @"communityPoints", @"availableClaim", @"id"]);
         if([claimID isKindOfClass:[NSString class]] && claimID.length)
-            claim(channelID, claimID);
+            claim(channelID, claimID, YES);
     });
 }
 
@@ -203,7 +211,7 @@ void FMChannelPointsHandleMessage(NSString *message) {
         return;
     findClaims(message, 0, ^(NSString *channelID, NSString *claimID) {
         dispatch_async(pointsQueue(), ^{
-            claim(channelID, claimID);
+            claim(channelID, claimID, YES);
         });
     });
 }
