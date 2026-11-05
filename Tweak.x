@@ -622,7 +622,7 @@ static BOOL forwardingAccountMenuCall;
 
 static UIImage *twitchIcon(NSString *name, NSString *systemName) {
     // The icons moved from TwitchCoreUI to TwitchCoreUIAssets
-    for(NSString *bundleID in @[@"twitch.TwitchCoreUIAssets", @"twitch.TwitchCoreUI"]) {
+    for(NSString *bundleID in @[@"tv.twitch.TwitchCoreUIAssets", @"twitch.TwitchCoreUI"]) {
         UIImage *image = [UIImage imageNamed:name inBundle:[NSBundle bundleWithIdentifier:bundleID] compatibleWithTraitCollection:nil];
         if(image)
             return image;
