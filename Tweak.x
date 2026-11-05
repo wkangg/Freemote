@@ -1028,13 +1028,35 @@ static NSString *durationText(long long seconds) {
     return nil;
 }
 
+// Channels ("#name") where you're a moderator or the broadcaster, from your USERSTATE there. @synchronized
+static NSMutableSet<NSString *> *moderatedChannels;
+
+static void noteUserState(NSArray<NSString *> *tags, NSString *channel) {
+    BOOL moderator = NO;
+    for(NSString *tag in tags) {
+        if([tag isEqualToString:@"mod=1"] || ([tag hasPrefix:@"badges="] && [[@"," stringByAppendingString:[tag substringFromIndex:7]] containsString:@",broadcaster/"]))
+            moderator = YES;
+    }
+    @synchronized(moderatedChannels) {
+        if(moderator)
+            [moderatedChannels addObject:channel.lowercaseString];
+        else
+            [moderatedChannels removeObject:channel.lowercaseString];
+    }
+}
+
 // Twitch shows viewers nothing when someone is timed out or banned, so a CLEARCHAT with a user gets a NOTICE after it,
-// which the React Native chat draws as a system line ({type: 'notice'}, any msg-id it doesn't know).
+// which the React Native chat draws as a system line ({type: 'notice'}, any msg-id it doesn't know). Moderators already
+// get Twitch's own lines for it, so they don't get ours.
 // "@ban-duration=600;room-id=…;target-user-id=…;tmi-sent-ts=… :tmi.twitch.tv CLEARCHAT #channel :login"
 static NSString *timeoutNoticeLine(NSArray<NSString *> *tags, NSString *rest, NSArray<NSString *> *words, NSString *channelID) {
     NSRange textStart = [rest rangeOfString:@" :"];
     if(words.count < 3 || textStart.location == NSNotFound || ![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
         return nil;
+    @synchronized(moderatedChannels) {
+        if([moderatedChannels containsObject:words[2].lowercaseString])
+            return nil;
+    }
     NSString *login = [[rest substringFromIndex:NSMaxRange(textStart)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if(!login.length)
         return nil;
@@ -1062,6 +1084,9 @@ static NSString *ircLineWithEmotes(NSString *line) {
     NSString *rest = [line substringFromIndex:NSMaxRange(tagsEnd)];
     NSArray<NSString *> *words = [rest componentsSeparatedByString:@" "];
     NSString *command = words.count > 1 ? words[1] : nil;
+    // Has no room-id
+    if([command isEqualToString:@"USERSTATE"] && words.count > 2)
+        noteUserState(tags, words[2]);
 
     NSString *channelID, *emotes = @"";
     NSUInteger emotesIndex = NSNotFound;
@@ -1885,6 +1910,7 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     deletedMessageIDs = [[NSCache alloc] init];
     deletedMessageIDs.countLimit = 5000;
     userClearDates = [[NSMutableDictionary alloc] init];
+    moderatedChannels = [[NSMutableSet alloc] init];
     MessageStringViewClass = objc_getClass("_TtC6Twitch17MessageStringView");
     MessageStringLayerClass = objc_getClass("_TtC6Twitch18MessageStringLayer");
     %init(MessageStringView = MessageStringViewClass, ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"), NSURLSessionWebSocketTask = objc_getClass("__NSURLSessionWebSocketTask") ?: [NSURLSessionWebSocketTask class]);
