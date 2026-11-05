@@ -641,7 +641,12 @@ static UITableViewCell *settingsCell(void) {
     }
     ConfigurableAccessoryTableViewCell *cell = [[cellClass alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Twitch.ConfigurableAccessoryTableViewCell"];
     [cell configureWithTitle:@"Freemote"];
-    if([cell respondsToSelector:@selector(setUseDefaultBackgroundColor:)])
+    // Swift-only stored Bool in 31.x (no setter), so set the ivar; without it the cell keeps
+    // UIKit's grouped background instead of the theme's
+    Ivar defaultBackgroundIvar = class_getInstanceVariable(object_getClass(cell), "useDefaultBackgroundColor");
+    if(defaultBackgroundIvar)
+        *(BOOL *)((uint8_t *)(__bridge void *)cell + ivar_getOffset(defaultBackgroundIvar)) = YES;
+    else if([cell respondsToSelector:@selector(setUseDefaultBackgroundColor:)])
         cell.useDefaultBackgroundColor = YES;
     UIImageView *arrowView = [[UIImageView alloc] initWithImage:twitchIcon(@"arrow-forward-Icon", @"chevron.right")];
     arrowView.tintColor = UIColor.grayColor;
