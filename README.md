@@ -1,0 +1,52 @@
+# Freemote
+
+A tweak that brings [BTTV](https://betterttv.com), [FFZ](https://www.frankerfacez.com) and [7TV](https://7tv.app)
+emotes to the Twitch iOS app.
+
+Originally written by [gilesgc](https://github.com/gilesgc/Freemote); this fork updates it for Twitch 31.x.
+
+## Features
+
+- BTTV, FFZ and 7TV emotes, global and per channel, in live chat, chat history and VOD chat
+- Wide emotes at their own width, and 7TV zero-width emotes drawn over the emote before them
+- Emote cards for external emotes, with the provider, uploader and a link to the emote's page
+- Emotes show up as each provider loads, even on messages that came in first
+- Deleted messages stay in chat, dimmed, instead of "message deleted by a moderator." (React Native stream screen)
+
+Works on both of Twitch's chat screens: the React Native one most streams open, and the native one vertical streams
+still use.
+
+## Install
+
+Grab a build from [Actions](https://github.com/wkangg/Freemote/actions):
+
+- **Jailbroken:** install the rootless or rootful `.deb`.
+- **Sideloaded:** use a Freemote `.ipa`, then sign and install it with your usual tool.
+
+To build an IPA yourself, run the `CI` workflow by hand with a direct link to a decrypted Twitch IPA:
+
+```sh
+gh workflow run build.yml -R wkangg/Freemote --ref master -f ipa_url=<decrypted IPA URL>
+```
+
+## Build
+
+Needs [Theos](https://theos.dev).
+
+```sh
+make package                                # rootful deb
+THEOS_PACKAGE_SCHEME=rootless make package  # rootless deb
+SIDELOADED=1 IPA=/path/to/Twitch.ipa make package  # IPA (needs theos-jailed)
+```
+
+## Logs
+
+Freemote logs to the system log with a `[Freemote]` prefix. From a computer with the phone plugged in:
+
+```sh
+uvx --python 3.13 pymobiledevice3 syslog live -m "[Freemote]"
+```
+
+## License
+
+[GPL-3.0](LICENSE)
