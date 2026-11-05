@@ -21,6 +21,10 @@
 // they load.
 #define FMHistoryEmoteTimeout 5
 
+// How long the React Native emote picker's emote sets wait for the channel's emotes when other queries were batched
+// into the same request (they wait too). On their own they wait FMHistoryEmoteTimeout.
+#define FMBatchedEmoteSetsTimeout 1.5
+
 static Class EmoteToken, TextToken, MessagesReceived;
 static FMEmoteManager *emoteManager;
 static dispatch_queue_t emoteQueue;
@@ -603,8 +607,10 @@ static void addEmoteCards(id json, NSURLRequest *request) {
         NSMutableDictionary *response = responses[i];
         if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
             continue;
+        // Its own ID (the image rewrite ignores anything after the emote ID): Apollo caches emotes by ID, and the
+        // emote picker's copy of this emote (no type) mustn't turn into a GLOBALS one, or the other way around
         response[@"data"] = @{@"emote": @{
-            @"__typename": @"Emote", @"id": freemoteEmoteID(emote), @"token": emote.emoteText, @"setID": @"",
+            @"__typename": @"Emote", @"id": [freemoteEmoteID(emote) stringByAppendingString:@"_card"], @"token": emote.emoteText, @"setID": @"",
             @"type": @"GLOBALS", @"owner": [NSNull null], @"subscriptionProduct": [NSNull null], @"bitsBadgeTierSummary": [NSNull null]
         }};
         [response removeObjectForKey:@"errors"];
@@ -680,8 +686,14 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
         // The owner is the same made-up user in every channel; the set (and so its emote list) is per channel
         NSString *setID = [NSString stringWithFormat:@"%@%@_%@", FMEmoteIDPrefix, providers[i][@"login"], channelID];
         NSMutableArray<NSDictionary *> *emotes = [[NSMutableArray alloc] init];
+        // A 7TV channel can add a global under an alias: one ID under two names. Apollo would merge the two into one
+        // cached emote and the picker would drop one, so only the first (the channel's name) goes in.
+        NSMutableSet<NSString *> *addedIDs = [[NSMutableSet alloc] init];
         for(NSString *name in names[i]) {
             FMEmote *emote = nameRegistry[name];
+            if([addedIDs containsObject:emote.emoteID])
+                continue;
+            [addedIDs addObject:emote.emoteID];
             [emotes addObject:@{
                 @"__typename": @"Emote", @"id": freemoteEmoteID(emote), @"setID": setID, @"token": name,
                 // No type: the picker sorts Twitch's types into their own sections (GLOBALS into Global, etc.)
@@ -1069,13 +1081,18 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     FMChannelPointsNoteRequest(task.originalRequest, session, NO);
 
-    // The emote picker only reads its sets when chat opens, so ChatEmoteSets waits for the channel's emotes (up to
-    // FMHistoryEmoteTimeout). Not by blocking: every React Native request shares this delegate queue. The task is
-    // finished later on the same queue instead.
+    // The emote picker only reads its sets when chat opens, so ChatEmoteSets waits for the channel's emotes. Not by
+    // blocking: every React Native request shares this delegate queue. The task is finished later on the same queue
+    // instead. Twitch's Apollo batches queries sent together (badges, locked emotes, sometimes chat history) into one
+    // request, which all wait with it, so a batch only waits briefly.
     NSString *emoteSetsChannel = !error && heldResponseBuffer(task) ? emoteSetsChannelID(task.originalRequest) : nil;
     if(emoteSetsChannel && ![emoteManager hasEmotesForChannel:emoteSetsChannel] && session.delegateQueue) {
-        FMLog("Emote picker for channel %@ is waiting for its emotes", emoteSetsChannel);
+        BOOL batched = gqlOperations(task.originalRequest).count > 1;
+        double timeout = batched ? FMBatchedEmoteSetsTimeout : FMHistoryEmoteTimeout;
+        FMLog("Emote picker for channel %@ is waiting for its emotes (%.1fs max%s)", emoteSetsChannel, timeout, batched ? ", batched with other queries" : "");
         NSOperationQueue *queue = session.delegateQueue;
+        // Logos' self isn't retained by blocks; React Native can free its handler (reload) during the wait
+        RCTHTTPRequestHandler *handler = self;
         // Whichever comes first: the emotes or the timeout
         __block BOOL finished = NO;
         NSObject *finishLock = [[NSObject alloc] init];
@@ -1088,12 +1105,12 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
             [queue addOperationWithBlock:^{
                 NSData *data = finishHeldResponse(task, nil, NO);
                 if(data.length)
-                    [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
+                    [handler URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
                 %orig(session, task, error);
             }];
         };
         loadChannelEmotes(emoteSetsChannel, finish);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), finish);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), finish);
         return;
     }
 
