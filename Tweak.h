@@ -85,3 +85,13 @@ typedef void (^RCTLogFunction)(NSInteger level, NSInteger source, NSString *file
 @property (nonatomic, assign) BOOL useDefaultBackgroundColor;
 - (void)configureWithTitle:(NSString *)title;
 @end
+
+// Twitch's themes (TwitchCoreUI.DarkMobileUITheme / LightMobileUITheme)
+@interface TWTheme : NSObject
+- (UIColor *)accessoryTintColor;
+@end
+
+@interface TWDefaultThemeManager : NSObject
++ (instancetype)defaultThemeManager;
+- (TWTheme *)currentThemeInTraitEnvironment:(id<UITraitEnvironment>)traitEnvironment;
+@end

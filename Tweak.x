@@ -630,7 +630,15 @@ static UIImage *twitchIcon(NSString *name, NSString *systemName) {
     return [UIImage systemImageNamed:systemName];
 }
 
-static UITableViewCell *settingsCell(void) {
+// The theme's color for the rows' arrows
+static UIColor *accessoryTintColor(UITableView *tableView) {
+    Class themeManagerClass = objc_getClass("TWDefaultThemeManager");
+    TWTheme *theme = [themeManagerClass respondsToSelector:@selector(defaultThemeManager)] ? [[themeManagerClass defaultThemeManager] currentThemeInTraitEnvironment:tableView] : nil;
+    UIColor *color = [theme respondsToSelector:@selector(accessoryTintColor)] ? theme.accessoryTintColor : nil;
+    return color ?: UIColor.grayColor;
+}
+
+static UITableViewCell *settingsCell(UITableView *tableView) {
     Class cellClass = objc_getClass("_TtC6Twitch34ConfigurableAccessoryTableViewCell");
     if(!cellClass) {
         FMLogFirst(1, "No ConfigurableAccessoryTableViewCell, the settings row is a plain one");
@@ -649,7 +657,7 @@ static UITableViewCell *settingsCell(void) {
     else if([cell respondsToSelector:@selector(setUseDefaultBackgroundColor:)])
         cell.useDefaultBackgroundColor = YES;
     UIImageView *arrowView = [[UIImageView alloc] initWithImage:twitchIcon(@"arrow-forward-Icon", @"chevron.right")];
-    arrowView.tintColor = UIColor.grayColor;
+    arrowView.tintColor = accessoryTintColor(tableView);
     cell.accessoryView = arrowView;
     UIImageView *iconView = swiftIvar(cell, "customImageView");
     if([iconView isKindOfClass:[UIImageView class]]) {
@@ -678,7 +686,7 @@ static UITableViewCell *settingsCell(void) {
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if([self freemote_isSettingsRow:indexPath tableView:tableView])
-        return settingsCell();
+        return settingsCell(tableView);
     forwardingAccountMenuCall = YES;
     UITableViewCell *cell = %orig;
     forwardingAccountMenuCall = NO;
