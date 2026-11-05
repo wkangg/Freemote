@@ -5,6 +5,7 @@
 // Chat rows also add our emotes to messages that came in before their channel's emotes did.
 NSString *const FMReactNativePatchSource =
     @"(function () {\n"
+    @"  // Error level, since release builds drop anything lower. Native logs these as its own (see watchForReactNativeReady).\n"
     @"  function log(message) {\n"
     @"    try {\n"
     @"      globalThis.nativeLoggingHook('[Freemote] ' + message, 3);\n"

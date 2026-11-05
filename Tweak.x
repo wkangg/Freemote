@@ -1019,17 +1019,27 @@ static void sendEmoteTable(NSString *channelID) {
     });
 }
 
-// React Native passes the JS's log lines to its log functions
+// React Native passes the JS's log lines to its log function. The patch logs at error level, since release builds drop
+// anything lower, so its lines are taken out here and logged as ours instead of as React Native errors.
 static void watchForReactNativeReady(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void (*addLogFunction)(RCTLogFunction) = (void (*)(RCTLogFunction))dlsym(RTLD_DEFAULT, "RCTAddLogFunction");
-        if(!addLogFunction) {
-            FMLog("No RCTAddLogFunction, React Native messages from before emotes load stay as text");
+        RCTLogFunction (*getLogFunction)(void) = (RCTLogFunction (*)(void))dlsym(RTLD_DEFAULT, "RCTGetLogFunction");
+        void (*setLogFunction)(RCTLogFunction) = (void (*)(RCTLogFunction))dlsym(RTLD_DEFAULT, "RCTSetLogFunction");
+        if(!getLogFunction || !setLogFunction) {
+            FMLog("No RCTSetLogFunction, React Native messages from before emotes load stay as text");
             return;
         }
-        addLogFunction(^(NSInteger level, NSInteger source, NSString *fileName, NSNumber *lineNumber, NSString *message) {
-            if(![message isKindOfClass:[NSString class]] || ![message hasSuffix:FMReactNativeReadyMessage])
+        RCTLogFunction reactLogFunction = getLogFunction();
+        setLogFunction(^(NSInteger level, NSInteger source, NSString *fileName, NSNumber *lineNumber, NSString *message) {
+            NSRange prefix = [message isKindOfClass:[NSString class]] ? [message rangeOfString:@"[Freemote] "] : (NSRange){NSNotFound, 0};
+            if(prefix.location == NSNotFound) {
+                if(reactLogFunction)
+                    reactLogFunction(level, source, fileName, lineNumber, message);
+                return;
+            }
+            FMLog("%{public}@", [message substringFromIndex:NSMaxRange(prefix)]);
+            if(![message hasSuffix:FMReactNativeReadyMessage])
                 return;
             atomic_store(&reactNativeReadyForEmotes, true);
             dispatch_async(reactNativeEmoteQueue, ^{
