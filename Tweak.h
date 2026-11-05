@@ -73,6 +73,7 @@
 // Draws a MessageString (Twitch.MessageStringView), e.g. in a chat row
 @interface MessageStringView : UIView
 @property (nonatomic, assign) BOOL freemote_dimmed; // %property
+@property (nonatomic, assign) CGFloat freemote_undimmedAlpha; // %property: its alpha before it was dimmed
 @end
 
 // SocketRocket, which React Native's WebSocket module uses

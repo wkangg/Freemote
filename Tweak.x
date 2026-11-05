@@ -1404,10 +1404,17 @@ static TWChatMessage *chatMessageInView(MessageStringView *view) {
 
 static void dimIfDeleted(MessageStringView *view) {
     BOOL deleted = atomic_load(&keptDeletedMessages) && isDeletedMessage(chatMessageInView(view));
-    if(deleted == view.freemote_dimmed)
-        return;
-    view.freemote_dimmed = deleted;
-    view.alpha = deleted ? FMDeletedMessageAlpha : 1;
+    if(deleted) {
+        if(!view.freemote_dimmed) {
+            view.freemote_undimmedAlpha = view.alpha;
+            view.freemote_dimmed = YES;
+        }
+        // Each time, in case Twitch set the view's alpha since
+        view.alpha = FMDeletedMessageAlpha;
+    } else if(view.freemote_dimmed) {
+        view.freemote_dimmed = NO;
+        view.alpha = view.freemote_undimmedAlpha;
+    }
 }
 
 %group KMP
@@ -1474,6 +1481,7 @@ static void dimIfDeleted(MessageStringView *view) {
 %hook MessageStringView
 
 %property (nonatomic, assign) BOOL freemote_dimmed;
+%property (nonatomic, assign) CGFloat freemote_undimmedAlpha;
 
 - (void)layoutSubviews {
     %orig;
