@@ -612,6 +612,115 @@ static void addEmoteCards(id json, NSURLRequest *request) {
     }
 }
 
+#pragma mark - Emote picker
+
+// The React Native screen's emote picker, and its : autocomplete, show the emote sets from Twitch's ChatEmoteSets query:
+// channel(id:) { self { availableEmoteSets { id emotes { id setID token type assetType modifiers { code } } owner { id
+// login displayName profileImageURL } } } }. Each of our providers is added as a set with its own owner, which the
+// picker shows as a section titled with the owner's displayName and its profileImageURL as the avatar. Twitch skips any
+// emote whose token an earlier set already has, so Twitch's own emotes win a name.
+
+// The channel of a ChatEmoteSets operation, or nil for any other operation
+static NSString *emoteSetsChannelIDFor(NSDictionary *operation) {
+    if(![operation isKindOfClass:[NSDictionary class]] || ![@"ChatEmoteSets" isEqual:operation[@"operationName"]])
+        return nil;
+    NSDictionary *variables = operation[@"variables"];
+    NSString *channelID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"channelID"] : nil;
+    return isChannelID(channelID) ? channelID : nil;
+}
+
+static NSString *emoteSetsChannelID(NSURLRequest *request) {
+    for(NSDictionary *operation in gqlOperations(request)) {
+        NSString *channelID = emoteSetsChannelIDFor(operation);
+        if(channelID)
+            return channelID;
+    }
+    return nil;
+}
+
+// Whether the request is ChatEmoteSets, which then starts loading the channel's emotes
+static BOOL isEmoteSetsRequest(NSURLRequest *request) {
+    NSString *channelID = emoteSetsChannelID(request);
+    if(channelID) {
+        FMLog("Holding back ChatEmoteSets for channel %@ to add emotes to the emote picker", channelID);
+        loadChannelEmotes(channelID, nil);
+    }
+    return channelID != nil;
+}
+
+// One set per provider, in this order: the channel's emotes first, then globals, each by name
+static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **summary) {
+    NSArray<NSDictionary *> *providers = @[
+        @{@"login": @"7tv", @"displayName": @"7TV", @"profileImageURL": @"https://avatars.githubusercontent.com/u/79559531?s=70"},
+        @{@"login": @"betterttv", @"displayName": @"BetterTTV", @"profileImageURL": @"https://betterttv.com/favicon.png"},
+        @{@"login": @"frankerfacez", @"displayName": @"FrankerFaceZ", @"profileImageURL": @"https://www.frankerfacez.com/static/images/favicon-96.png"},
+    ];
+    NSArray<NSMutableArray<NSString *> *> *names = @[[NSMutableArray array], [NSMutableArray array], [NSMutableArray array]];
+    NSDictionary<NSString *, FMEmote *> *nameRegistry = [emoteManager emoteNameRegistryForChannel:channelID];
+    [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, FMEmote *emote, BOOL *stop) {
+        EmoteType type = emote.emoteType;
+        [names[type == SevenTV || type == SevenTVGlobal ? 0 : type == BTTV || type == BTTVGlobal ? 1 : 2] addObject:name];
+    }];
+
+    NSMutableArray<NSDictionary *> *sets = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *counts = [[NSMutableArray alloc] init];
+    for(NSUInteger i = 0; i < providers.count; i++) {
+        [names[i] sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+            EmoteType typeA = nameRegistry[a].emoteType, typeB = nameRegistry[b].emoteType;
+            BOOL globalA = typeA == BTTVGlobal || typeA == FFZGlobal || typeA == SevenTVGlobal;
+            BOOL globalB = typeB == BTTVGlobal || typeB == FFZGlobal || typeB == SevenTVGlobal;
+            if(globalA != globalB)
+                return globalA ? NSOrderedDescending : NSOrderedAscending;
+            return [a localizedCaseInsensitiveCompare:b];
+        }];
+        [counts addObject:[NSString stringWithFormat:@"%@ %lu", providers[i][@"displayName"], (unsigned long)names[i].count]];
+        if(!names[i].count)
+            continue;
+
+        // The owner is the same made-up user in every channel; the set (and so its emote list) is per channel
+        NSString *setID = [NSString stringWithFormat:@"%@%@_%@", FMEmoteIDPrefix, providers[i][@"login"], channelID];
+        NSMutableArray<NSDictionary *> *emotes = [[NSMutableArray alloc] init];
+        for(NSString *name in names[i]) {
+            FMEmote *emote = nameRegistry[name];
+            [emotes addObject:@{
+                @"__typename": @"Emote", @"id": freemoteEmoteID(emote), @"setID": setID, @"token": name,
+                // No type: the picker sorts Twitch's types into their own sections (GLOBALS into Global, etc.)
+                @"type": [NSNull null], @"assetType": emote.isAnimated ? @"ANIMATED" : @"STATIC", @"modifiers": @[]
+            }];
+        }
+        NSMutableDictionary *owner = [providers[i] mutableCopy];
+        owner[@"__typename"] = @"User";
+        owner[@"id"] = [FMEmoteIDPrefix stringByAppendingString:providers[i][@"login"]];
+        [sets addObject:@{@"__typename": @"EmoteSet", @"id": setID, @"emotes": emotes, @"owner": owner}];
+    }
+    *summary = [counts componentsJoinedByString:@", "];
+    return sets;
+}
+
+static void addEmotePickerSets(id json, NSURLRequest *request) {
+    NSArray *operations = gqlOperations(request);
+    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
+    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
+        NSString *channelID = emoteSetsChannelIDFor(operations[i]);
+        if(!channelID)
+            continue;
+        NSDictionary *response = responses[i];
+        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
+        NSDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
+        NSMutableDictionary *channelSelf = [channel isKindOfClass:[NSDictionary class]] ? channel[@"self"] : nil;
+        NSArray *sets = [channelSelf isKindOfClass:[NSMutableDictionary class]] ? channelSelf[@"availableEmoteSets"] : nil;
+        if(![sets isKindOfClass:[NSArray class]]) {
+            // Logged out (no self), or the response shape changed
+            FMLog("ChatEmoteSets for channel %@ has no availableEmoteSets, the emote picker stays as is", channelID);
+            continue;
+        }
+        NSString *summary;
+        NSArray<NSDictionary *> *newSets = emotePickerSets(channelID, &summary);
+        channelSelf[@"availableEmoteSets"] = [sets arrayByAddingObjectsFromArray:newSets];
+        FMLog("Emote picker for channel %@: added %@ emotes (%s)", channelID, summary, [emoteManager hasEmotesForChannel:channelID] ? "all loaded" : "still loading");
+    }
+}
+
 static id swiftIvar(id object, const char *name) {
     Ivar ivar = class_getInstanceVariable([object class], name);
     return ivar ? object_getIvar(object, ivar) : nil;
@@ -864,6 +973,7 @@ static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL 
     }
     addEmotesToChatHistory(json, waitForEmotes);
     addEmoteCards(json, request);
+    addEmotePickerSets(json, request);
 
     NSString *videoID = chatHistoryVideoID(request);
     if(videoID) {
@@ -884,13 +994,14 @@ static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL 
 
 static char heldResponseBufferKey;
 
-// The response buffer for a chat history or emote card task, or nil for any other task
+// The response buffer for a chat history, emote card or emote picker task, or nil for any other task
 static NSMutableData *heldResponseBuffer(NSURLSessionTask *task) {
     id buffer = objc_getAssociatedObject(task, &heldResponseBufferKey);
     if(!buffer) {
-        // Both checks have to run: they start loading emotes and track which emote card is open
+        // Every check has to run: they start loading emotes and track which emote card is open
         BOOL hold = isChatHistoryRequest(task.originalRequest);
         hold = isEmoteCardRequest(task.originalRequest) || hold;
+        hold = isEmoteSetsRequest(task.originalRequest) || hold;
         buffer = hold ? [[NSMutableData alloc] init] : [NSNull null];
         objc_setAssociatedObject(task, &heldResponseBufferKey, buffer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -957,6 +1068,35 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     FMChannelPointsNoteRequest(task.originalRequest, session, NO);
+
+    // The emote picker only reads its sets when chat opens, so ChatEmoteSets waits for the channel's emotes (up to
+    // FMHistoryEmoteTimeout). Not by blocking: every React Native request shares this delegate queue. The task is
+    // finished later on the same queue instead.
+    NSString *emoteSetsChannel = !error && heldResponseBuffer(task) ? emoteSetsChannelID(task.originalRequest) : nil;
+    if(emoteSetsChannel && ![emoteManager hasEmotesForChannel:emoteSetsChannel] && session.delegateQueue) {
+        FMLog("Emote picker for channel %@ is waiting for its emotes", emoteSetsChannel);
+        NSOperationQueue *queue = session.delegateQueue;
+        // Whichever comes first: the emotes or the timeout
+        __block BOOL finished = NO;
+        NSObject *finishLock = [[NSObject alloc] init];
+        dispatch_block_t finish = ^{
+            @synchronized(finishLock) {
+                if(finished)
+                    return;
+                finished = YES;
+            }
+            [queue addOperationWithBlock:^{
+                NSData *data = finishHeldResponse(task, nil, NO);
+                if(data.length)
+                    [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
+                %orig(session, task, error);
+            }];
+        };
+        loadChannelEmotes(emoteSetsChannel, finish);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), finish);
+        return;
+    }
+
     // The React Native chat rows add emotes that load later
     NSData *data = finishHeldResponse(task, error, NO);
     if(data.length)
