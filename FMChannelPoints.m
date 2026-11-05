@@ -3,11 +3,12 @@
 #import "FMSettings.h"
 
 // Twitch 31.x's own operations (TwitchGraphQLAPI's ClaimChannelPoints and ChannelPoints), by their persisted query
-// hashes. If the server stops knowing a hash, the query is sent as text instead.
+// hashes. If the server stops knowing a hash, the query is sent as text instead (ours leaves out what isn't used, and
+// GraphQL rejects variables a query declares without using, so includeSettings is only for the hashed one).
 static NSString *const FMClaimHash = @"bb04fa30fb690d918db7776b4734f6ae86cd88e3029b4dabcf677eab0f9855b1";
 static NSString *const FMClaimQuery = @"mutation ClaimChannelPoints($input: ClaimCommunityPointsInput!) { claimCommunityPoints(input: $input) { claim { id pointsEarnedTotal } currentPoints error { code } } }";
 static NSString *const FMChannelPointsHash = @"821b719cdc52f972fc2a068b9a0217c60bffc9d508383c224a35441dbfb3e00f";
-static NSString *const FMChannelPointsQuery = @"query ChannelPoints($channel: ID!, $includeSettings: Boolean!, $includeUserInfo: Boolean!) { user(id: $channel) { channel { selfView: self @include(if: $includeUserInfo) { communityPoints { availableClaim { id } } } } } }";
+static NSString *const FMChannelPointsQuery = @"query ChannelPoints($channel: ID!, $includeUserInfo: Boolean!) { user(id: $channel) { channel { selfView: self @include(if: $includeUserInfo) { communityPoints { availableClaim { id } } } } } }";
 
 // How long after checking a channel for a waiting bonus it isn't checked again: chats get joined from several places
 #define FMChannelCheckInterval 60
