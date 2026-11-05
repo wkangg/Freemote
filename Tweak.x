@@ -5,6 +5,7 @@
 #import "FMReactNativePatch.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
+#import <dlfcn.h>
 
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
@@ -13,7 +14,9 @@
 // Any number: the React Native segment our JS patch runs as
 #define FMReactNativeSegmentID 0x46524D
 
-// How long a chat history response is held back waiting for the channel's emotes
+// How long a chat history or VOD chat response on a native screen is held back waiting for the channel's emotes.
+// React Native chat history isn't held: it gets the emotes that are in by then, and its chat rows add the rest as
+// they load.
 #define FMHistoryEmoteTimeout 5
 
 static Class EmoteToken, TextToken, MessagesReceived;
@@ -261,6 +264,7 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
     });
 }
 
+// Whatever's in by the timeout: the providers that answered, or globals at least
 static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
         FMLog("Chat history for channel %{public}@ is waiting for its emotes", channelID);
@@ -364,10 +368,11 @@ static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *
 
 // Finds every channel { id recentChatMessages { content { contentFragments|messageFragments|fragments } } } in a
 // response (native ChatHistory and TheaterPortalPreload, React Native ChatHistory)
-static void addEmotesToChatHistory(id json) {
+// waitForEmotes: NO for React Native, whose chat rows add emotes that load later
+static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
     if([json isKindOfClass:[NSArray class]]) {
         for(id item in json)
-            addEmotesToChatHistory(item);
+            addEmotesToChatHistory(item, waitForEmotes);
         return;
     }
     if(![json isKindOfClass:[NSMutableDictionary class]])
@@ -375,9 +380,9 @@ static void addEmotesToChatHistory(id json) {
 
     NSArray *messages = json[@"recentChatMessages"];
     if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
-        NSDate *start = [NSDate date];
-        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForChannelEmotes(json[@"id"]);
-        NSTimeInterval waited = -start.timeIntervalSinceNow;
+        // Otherwise whatever's in so far (globals at least, once they're in)
+        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForEmotes ? waitForChannelEmotes(json[@"id"]) : [emoteManager emoteNameRegistryForChannel:json[@"id"]];
+        BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
         NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
@@ -394,13 +399,13 @@ static void addEmotesToChatHistory(id json) {
                 withoutFragments++;
         }
         // Many messages without fragments means the response shape changed
-        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, waited %.1fs)",
-              json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, waited);
+        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, %{public}s)",
+              json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, loaded ? "all loaded" : "still loading");
         return;
     }
 
     for(id value in [json allValues])
-        addEmotesToChatHistory(value);
+        addEmotesToChatHistory(value, waitForEmotes);
 }
 
 static NSUInteger codePointCount(NSString *text) {
@@ -753,14 +758,14 @@ static void addEmoteCardLink(RCTParagraphComponentView *view) {
 
 #pragma mark - Held back responses
 
-static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request) {
+static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL waitForEmotes) {
     NSError *error;
     id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
     if(!json) {
         FMLog("Held back response isn't JSON (%lu bytes), left as is: %{public}@", (unsigned long)data.length, error.localizedDescription);
         return data;
     }
-    addEmotesToChatHistory(json);
+    addEmotesToChatHistory(json, waitForEmotes);
     addEmoteCards(json, request);
 
     NSString *videoID = chatHistoryVideoID(request);
@@ -802,15 +807,16 @@ static BOOL holdResponseData(NSURLSessionDataTask *task, NSData *data) {
     return buffer != nil;
 }
 
-// The rewritten response to hand over before the task completes, or nil if it wasn't held back
-static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error) {
+// The rewritten response to hand over before the task completes, or nil if it wasn't held back.
+// waitForEmotes: whether live chat history waits for the channel's emotes (see FMHistoryEmoteTimeout).
+static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL waitForEmotes) {
     NSMutableData *buffer = heldResponseBuffer(task);
     if(!buffer || ![task isKindOfClass:[NSURLSessionDataTask class]])
         return nil;
     objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if(error)
         FMLog("Held back request failed, left as is: %{public}@", error.localizedDescription);
-    return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest);
+    return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest, waitForEmotes);
 }
 
 // Apollo (native screens) and React Native's fetch (the React Native stream screen) both collect a task's data and
@@ -823,7 +829,8 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error) {
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    NSData *data = finishHeldResponse(task, error);
+    // Nothing adds emotes to native chat history later, so it waits for them
+    NSData *data = finishHeldResponse(task, error, YES);
     if(data.length)
         [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
     %orig;
@@ -851,7 +858,8 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error) {
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    NSData *data = finishHeldResponse(task, error);
+    // The React Native chat rows add emotes that load later
+    NSData *data = finishHeldResponse(task, error, NO);
     if(data.length)
         [self URLSession:session dataTask:(NSURLSessionDataTask *)task didReceiveData:data];
     %orig;
@@ -981,6 +989,57 @@ static NSString *ircLineWithEmotes(NSString *line) {
 
 %end
 
+// A message that comes in before its channel's emotes is drawn without them, so our JS patch takes each channel's
+// emote names (name -> our emote ID) as they load, and its chat rows add the ones their message is missing. It
+// registers a callable module for that; calling one that isn't registered is a fatal JS error, so nothing is sent
+// until the patch logs that it's ready.
+static __weak RCTInstance *reactInstance;
+static atomic_bool reactNativeReadyForEmotes;
+static dispatch_queue_t reactNativeEmoteQueue; // serial, so a channel's last table sent is its newest
+
+#define FMReactNativeReadyMessage @"[Freemote] Ready for emote tables"
+
+// Only on reactNativeEmoteQueue
+static void sendEmoteTableNow(NSString *channelID) {
+    RCTInstance *instance = reactInstance;
+    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = emoteManager.channelNameRegistries[channelID];
+    if(!atomic_load(&reactNativeReadyForEmotes) || !instance || !nameRegistry)
+        return;
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionaryWithCapacity:nameRegistry.count];
+    [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, BTTVEmote *emote, BOOL *stop) {
+        names[name] = freemoteEmoteID(emote);
+    }];
+    [instance callFunctionOnJSModule:@"Freemote" method:@"setEmotes" args:@[channelID, names]];
+    FMLogFirst(10, "Sent %lu emote names for channel %{public}@ to React Native", (unsigned long)names.count, channelID);
+}
+
+static void sendEmoteTable(NSString *channelID) {
+    dispatch_async(reactNativeEmoteQueue, ^{
+        sendEmoteTableNow(channelID);
+    });
+}
+
+// React Native passes the JS's log lines to its log functions
+static void watchForReactNativeReady(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void (*addLogFunction)(RCTLogFunction) = (void (*)(RCTLogFunction))dlsym(RTLD_DEFAULT, "RCTAddLogFunction");
+        if(!addLogFunction) {
+            FMLog("No RCTAddLogFunction, React Native messages from before emotes load stay as text");
+            return;
+        }
+        addLogFunction(^(NSInteger level, NSInteger source, NSString *fileName, NSNumber *lineNumber, NSString *message) {
+            if(![message isKindOfClass:[NSString class]] || ![message hasSuffix:FMReactNativeReadyMessage])
+                return;
+            atomic_store(&reactNativeReadyForEmotes, true);
+            dispatch_async(reactNativeEmoteQueue, ^{
+                for(NSString *channelID in emoteManager.channelNameRegistries)
+                    sendEmoteTableNow(channelID);
+            });
+        });
+    });
+}
+
 // The React Native screen draws each emote as a square in its JS, so a JS patch makes ours wide. A registered segment
 // is evaluated on the JS thread's queue, and the bundle gets queued from here, so the patch runs before the bundle.
 %hook RCTInstance
@@ -993,8 +1052,16 @@ static NSString *ircLineWithEmotes(NSString *line) {
     else if(![FMReactNativePatchSource writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
         FMLog("Couldn't write the React Native patch, emotes stay square: %{public}@", error.localizedDescription);
     else {
+        // A new runtime: wait for its patch to say it's ready
+        atomic_store(&reactNativeReadyForEmotes, false);
+        if([self respondsToSelector:@selector(callFunctionOnJSModule:method:args:)]) {
+            reactInstance = self;
+            watchForReactNativeReady();
+        } else {
+            FMLog("RCTInstance changed, React Native messages from before emotes load stay as text");
+        }
         [self registerSegmentWithId:@(FMReactNativeSegmentID) path:path];
-        FMLog("Registered the React Native emote size patch");
+        FMLog("Registered the React Native patch");
     }
     %orig;
 }
@@ -1467,6 +1534,10 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     emoteManager = [[FMEmoteManager alloc] init];
     hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
+    reactNativeEmoteQueue = dispatch_queue_create("com.gilesgc.freemote.react-native-emotes", DISPATCH_QUEUE_SERIAL);
+    emoteManager.channelEmotesChanged = ^(NSString *channelID) {
+        sendEmoteTable(channelID);
+    };
     chatHistoryOperations = [NSSet setWithArray:@[@"ChatHistory", @"TheaterPortalPreload", @"VideoCommentsByContentOffset", @"VideoCommentsByCursor"]];
     channelIDsByName = [[NSMutableDictionary alloc] init];
     channelIDsByMessageID = [[NSCache alloc] init];

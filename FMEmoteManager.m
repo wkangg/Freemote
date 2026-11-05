@@ -1,6 +1,11 @@
 #import "FMEmoteManager.h"
 #import "FMLog.h"
 
+@interface FMEmoteManager ()
+// Channels whose requests have all finished. Their emotes are published as each request finishes, before this.
+@property (atomic, copy) NSSet<NSString *> *loadedChannelIDs;
+@end
+
 @implementation FMEmoteManager
 
 - (id)init {
@@ -11,105 +16,137 @@
         _emoteRegistry = @{};
         _channelNameRegistries = @{};
         _globalNameRegistry = @{};
-        _globalEmoteRegistry = [[NSMutableDictionary alloc] init];
-        _globalEmoteNameRegistry = [[NSMutableDictionary alloc] init];
+        _loadedChannelIDs = [NSSet set];
     }
 
     return self;
 }
 
 - (void)loadEmotesForChannel:(NSString *)channelID {
-    // Fetch everything in parallel; chat history waits on this
+    // Fetch everything in parallel and publish each provider's emotes as soon as its request finishes, so a slow
+    // provider doesn't hold up the others. Returns once they're all in, which native chat history and VOD chat wait on.
     FMHTTPClient *httpClient = _httpClient;
-    BOOL needsGlobals = _globalEmoteRegistry.count == 0;
-    __block NSDictionary *bttvGlobalInfo, *ffzGlobalInfo, *sevenTVGlobalInfo, *bttvEmoteInfo, *ffzEmoteInfo, *sevenTVEmoteInfo, *ffzGlobalSets, *ffzRoom;
+    NSDictionary *knownGlobals = self.globalNameRegistry;
+    BOOL needsGlobals = knownGlobals.count == 0;
+    // Each provider's emotes once its request is done, in name precedence order: later lists win a name, so channel
+    // emotes win over globals with the same name
+    NSMutableArray<NSArray<BTTVEmote *> *> *globalLists = [@[@[], @[], @[]] mutableCopy];
+    NSMutableArray<NSArray<BTTVEmote *> *> *channelLists = [@[@[], @[], @[]] mutableCopy];
+
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    void (^fetch)(NSMutableArray *, NSUInteger, NSArray *(^)(void)) = ^(NSMutableArray *lists, NSUInteger index, NSArray *(^fetchEmotes)(void)) {
+        dispatch_group_async(group, queue, ^{
+            NSArray<BTTVEmote *> *emotes = fetchEmotes();
+            @synchronized(self) {
+                lists[index] = emotes;
+                [self publishEmotes:emotes channelID:channelID globals:needsGlobals ? nil : knownGlobals globalLists:globalLists channelLists:channelLists];
+            }
+            // Even with none of its own: the first publish is what gives a channel its table (globals included)
+            void (^channelEmotesChanged)(NSString *) = self.channelEmotesChanged;
+            if(channelEmotesChanged)
+                channelEmotesChanged(channelID);
+        });
+    };
     if(needsGlobals) {
-        dispatch_group_async(group, queue, ^{ bttvGlobalInfo = [httpClient bttvGlobalEmotes]; });
-        dispatch_group_async(group, queue, ^{ ffzGlobalInfo = [httpClient ffzGlobalEmotes]; });
-        dispatch_group_async(group, queue, ^{ sevenTVGlobalInfo = [httpClient sevenTVGlobalEmotes]; });
+        fetch(globalLists, 0, ^NSArray *{ return [self emotesFromInfo:[httpClient bttvGlobalEmotes] type:BTTVGlobal]; });
+        fetch(globalLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzGlobalEmotes] type:FFZGlobal]; });
+        fetch(globalLists, 2, ^NSArray *{
+            NSDictionary *info = [httpClient sevenTVGlobalEmotes];
+            return [self emotesFromInfo:[info isKindOfClass:[NSDictionary class]] ? info[@"emotes"] : nil type:SevenTVGlobal];
+        });
     }
-    dispatch_group_async(group, queue, ^{ bttvEmoteInfo = [httpClient bttvEmoteInformationForChannelID:channelID]; });
-    dispatch_group_async(group, queue, ^{ ffzEmoteInfo = [httpClient ffzEmoteInformationForChannelID:channelID]; });
-    dispatch_group_async(group, queue, ^{ sevenTVEmoteInfo = [httpClient sevenTVEmoteInformationForChannelID:channelID]; });
+    fetch(channelLists, 0, ^NSArray *{
+        NSDictionary *info = [httpClient bttvEmoteInformationForChannelID:channelID];
+        if(![info isKindOfClass:[NSDictionary class]])
+            return @[];
+        return [[self emotesFromInfo:info[@"channelEmotes"] type:BTTV] arrayByAddingObjectsFromArray:[self emotesFromInfo:info[@"sharedEmotes"] type:BTTV]];
+    });
+    fetch(channelLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzEmoteInformationForChannelID:channelID] type:FFZ]; });
+    fetch(channelLists, 2, ^NSArray *{
+        NSDictionary *info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
+        id emoteSet = [info isKindOfClass:[NSDictionary class]] ? info[@"emote_set"] : nil;
+        return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
+    });
     // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
+    __block NSDictionary *ffzGlobalSets, *ffzRoom;
     dispatch_group_t sizeGroup = dispatch_group_create();
     if(needsGlobals)
         dispatch_group_async(sizeGroup, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
     dispatch_group_async(sizeGroup, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
-    if(needsGlobals) {
-        NSUInteger bttv = [self addEmoteInfo:bttvGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:BTTVGlobal];
-        NSUInteger ffz = [self addEmoteInfo:ffzGlobalInfo toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:FFZGlobal];
-        NSUInteger sevenTV = [sevenTVGlobalInfo isKindOfClass:[NSDictionary class]]
-            ? [self addEmoteInfo:sevenTVGlobalInfo[@"emotes"] toRegistry:_globalEmoteRegistry nameRegistry:_globalEmoteNameRegistry type:SevenTVGlobal] : 0;
-        self.globalNameRegistry = _globalEmoteNameRegistry;
-        FMLog("Global emotes: BTTV %lu, FFZ %lu, 7TV %lu", (unsigned long)bttv, (unsigned long)ffz, (unsigned long)sevenTV);
+    if(needsGlobals)
+        FMLog("Global emotes: BTTV %lu, FFZ %lu, 7TV %lu", (unsigned long)globalLists[0].count, (unsigned long)globalLists[1].count, (unsigned long)globalLists[2].count);
+    // 0 for a provider usually means the channel has no account there (or the request failed, logged above)
+    FMLog("Channel %{public}@ emotes: BTTV %lu, FFZ %lu, 7TV %lu", channelID, (unsigned long)channelLists[0].count, (unsigned long)channelLists[1].count, (unsigned long)channelLists[2].count);
+    self.loadedChannelIDs = [self.loadedChannelIDs setByAddingObject:channelID];
+
+    // Sizes land on the same emote objects, so messages after this show FFZ emotes at their own size
+    dispatch_group_notify(sizeGroup, queue, ^{
+        NSDictionary *registry = self.emoteRegistry;
+        if(needsGlobals)
+            [self addFFZSizes:ffzGlobalSets toRegistry:registry];
+        [self addFFZSizes:ffzRoom toRegistry:registry];
+        // Our emote IDs carry the width, so the channel's names are sent again with the new ones
+        void (^channelEmotesChanged)(NSString *) = self.channelEmotesChanged;
+        if(channelEmotesChanged)
+            channelEmotesChanged(channelID);
+    });
+}
+
+// Adds the emotes from a request that just finished, and rebuilds the channel's name registry from every list so
+// far (and the global one too, if `globals` is nil). Only under @synchronized(self).
+- (void)publishEmotes:(NSArray<BTTVEmote *> *)emotes channelID:(NSString *)channelID globals:(NSDictionary *)globals
+          globalLists:(NSArray<NSArray<BTTVEmote *> *> *)globalLists channelLists:(NSArray<NSArray<BTTVEmote *> *> *)channelLists {
+    NSMutableDictionary *nameRegistry = [NSMutableDictionary dictionary];
+    if(!globals) {
+        for(NSArray<BTTVEmote *> *list in globalLists)
+            for(BTTVEmote *emote in list)
+                nameRegistry[emote.emoteText] = emote;
+        globals = [nameRegistry copy];
+    } else {
+        [nameRegistry addEntriesFromDictionary:globals];
     }
+    for(NSArray<BTTVEmote *> *list in channelLists)
+        for(BTTVEmote *emote in list)
+            nameRegistry[emote.emoteText] = emote;
 
     // Emote IDs are unique across channels and providers, so one ID registry holds everything
     NSMutableDictionary *registry = [self.emoteRegistry mutableCopy];
-    [registry addEntriesFromDictionary:_globalEmoteRegistry];
-    // Channel emotes are added last so they win over globals with the same name
-    NSMutableDictionary *nameRegistry = [_globalEmoteNameRegistry mutableCopy];
-
-    NSUInteger bttv = 0, ffz, sevenTV = 0;
-    if([bttvEmoteInfo isKindOfClass:[NSDictionary class]] && bttvEmoteInfo[@"channelEmotes"]) {
-        bttv += [self addEmoteInfo:bttvEmoteInfo[@"channelEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
-        bttv += [self addEmoteInfo:bttvEmoteInfo[@"sharedEmotes"] toRegistry:registry nameRegistry:nameRegistry type:BTTV];
-    }
-
-    ffz = [self addEmoteInfo:ffzEmoteInfo toRegistry:registry nameRegistry:nameRegistry type:FFZ];
-
-    if([sevenTVEmoteInfo isKindOfClass:[NSDictionary class]] && [sevenTVEmoteInfo[@"emote_set"] isKindOfClass:[NSDictionary class]])
-        sevenTV = [self addEmoteInfo:sevenTVEmoteInfo[@"emote_set"][@"emotes"] toRegistry:registry nameRegistry:nameRegistry type:SevenTV];
-    // 0 for a provider usually means the channel has no account there (or the request failed, logged above)
-    FMLog("Channel %{public}@ emotes: BTTV %lu, FFZ %lu, 7TV %lu", channelID, (unsigned long)bttv, (unsigned long)ffz, (unsigned long)sevenTV);
-
+    for(BTTVEmote *emote in emotes)
+        registry[emote.emoteID] = emote;
     NSMutableDictionary *channelNameRegistries = [self.channelNameRegistries mutableCopy];
     channelNameRegistries[channelID] = nameRegistry;
 
     // ID registry first: a message can only use a name once its image URL resolves
     self.emoteRegistry = registry;
+    self.globalNameRegistry = globals;
     self.channelNameRegistries = channelNameRegistries;
-
-    // Sizes land on the same emote objects, so messages after this show FFZ emotes at their own size
-    dispatch_group_notify(sizeGroup, queue, ^{
-        if(needsGlobals)
-            [self addFFZSizes:ffzGlobalSets toRegistry:registry];
-        [self addFFZSizes:ffzRoom toRegistry:registry];
-    });
 }
 
 - (BOOL)hasEmotesForChannel:(NSString *)channelID {
-    return self.channelNameRegistries[channelID] != nil;
+    return [self.loadedChannelIDs containsObject:channelID];
 }
 
 - (NSDictionary<NSString *, BTTVEmote *> *)emoteNameRegistryForChannel:(NSString *)channelID {
     return (channelID ? self.channelNameRegistries[channelID] : nil) ?: self.globalNameRegistry;
 }
 
-// Returns how many emotes were added
-- (NSUInteger)addEmoteInfo:(id)emoteInfo toRegistry:(NSMutableDictionary *)registry nameRegistry:(NSMutableDictionary *)nameRegistry type:(EmoteType)type {
+- (NSArray<BTTVEmote *> *)emotesFromInfo:(id)emoteInfo type:(EmoteType)type {
     // Error responses (e.g. unknown channel) are dictionaries rather than arrays
     if(![emoteInfo isKindOfClass:[NSArray class]])
-        return 0;
+        return @[];
 
-    NSUInteger count = 0;
-
+    NSMutableArray<BTTVEmote *> *emotes = [NSMutableArray array];
     for(NSDictionary *emoteDict in emoteInfo) {
         if(![emoteDict isKindOfClass:[NSDictionary class]])
             continue;
         BTTVEmote *emote = [[BTTVEmote alloc] initWithDictData:emoteDict emoteType:type];
-        if(!emote.emoteID || !emote.emoteText)
-            continue;
-        [registry setObject:emote forKey:emote.emoteID];
-        [nameRegistry setObject:emote forKey:emote.emoteText];
-        count++;
+        if(emote.emoteID && emote.emoteText)
+            [emotes addObject:emote];
     }
-    return count;
+    return emotes;
 }
 
 // FFZ API response: {sets: {<set ID>: {emoticons: [{id, width, height, ...}]}}}. Sets the aspect ratio of the FFZ
