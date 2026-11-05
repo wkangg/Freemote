@@ -11,7 +11,8 @@ Originally written by [gilesgc](https://github.com/gilesgc/Freemote); this fork 
 - Wide emotes at their own width, and 7TV zero-width emotes drawn over the emote before them
 - Emote cards for external emotes, with the provider, uploader and a link to the emote's page
 - Emotes show up as each provider loads, even on messages that came in first
-- Deleted messages stay in chat, dimmed, instead of "message deleted by a moderator." (React Native stream screen)
+- Deleted messages, and messages from users who were timed out or banned, stay in chat, dimmed, and chat stays when a
+  moderator clears it
 - Channel points bonuses claimed as soon as they show up
 - A Freemote page at the bottom of the account menu to turn each feature on or off
 

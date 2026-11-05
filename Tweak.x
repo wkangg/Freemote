@@ -387,6 +387,9 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
         BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
         NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
+            // So native chat knows the channel of history messages too (a timeout only dims messages from its channel)
+            if([message isKindOfClass:[NSDictionary class]] && [message[@"id"] isKindOfClass:[NSString class]])
+                [channelIDsByMessageID setObject:json[@"id"] forKey:message[@"id"]];
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
             BOOL hasFragments = NO;
             if([content isKindOfClass:[NSMutableDictionary class]]) {
@@ -1017,6 +1020,63 @@ static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, FMEmo
     return emotes.count ? [emotes componentsJoinedByString:@"/"] : nil;
 }
 
+// "10 minutes", in the largest unit it's a whole number of
+static NSString *durationText(long long seconds) {
+    long long sizes[] = {86400, 3600, 60, 1};
+    NSString *units[] = {@"day", @"hour", @"minute", @"second"};
+    for(int i = 0; i < 4; i++) {
+        if(seconds % sizes[i] == 0)
+            return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
+    }
+    return nil;
+}
+
+// Channels ("#name") where you're a moderator or the broadcaster, from your USERSTATE there. @synchronized
+static NSMutableSet<NSString *> *moderatedChannels;
+
+static void noteUserState(NSArray<NSString *> *tags, NSString *channel) {
+    BOOL moderator = NO;
+    for(NSString *tag in tags) {
+        if([tag isEqualToString:@"mod=1"] || ([tag hasPrefix:@"badges="] && [[@"," stringByAppendingString:[tag substringFromIndex:7]] containsString:@",broadcaster/"]))
+            moderator = YES;
+    }
+    @synchronized(moderatedChannels) {
+        if(moderator)
+            [moderatedChannels addObject:channel.lowercaseString];
+        else
+            [moderatedChannels removeObject:channel.lowercaseString];
+    }
+}
+
+// Twitch shows viewers nothing when someone is timed out or banned, so a CLEARCHAT with a user gets a NOTICE after it,
+// which the React Native chat draws as a system line ({type: 'notice'}, any msg-id it doesn't know). Moderators already
+// get Twitch's own lines for it, so they don't get ours.
+// "@ban-duration=600;room-id=…;target-user-id=…;tmi-sent-ts=… :tmi.twitch.tv CLEARCHAT #channel :login"
+static NSString *timeoutNoticeLine(NSArray<NSString *> *tags, NSString *rest, NSArray<NSString *> *words, NSString *channelID) {
+    NSRange textStart = [rest rangeOfString:@" :"];
+    if(words.count < 3 || textStart.location == NSNotFound || ![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
+        return nil;
+    @synchronized(moderatedChannels) {
+        if([moderatedChannels containsObject:words[2].lowercaseString])
+            return nil;
+    }
+    NSString *login = [[rest substringFromIndex:NSMaxRange(textStart)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if(!login.length)
+        return nil;
+    NSString *duration, *sentTs = @"";
+    for(NSString *tag in tags) {
+        if([tag hasPrefix:@"ban-duration="])
+            duration = [tag substringFromIndex:13];
+        else if([tag hasPrefix:@"tmi-sent-ts="])
+            sentTs = [tag substringFromIndex:12];
+    }
+    NSString *text = duration.longLongValue > 0
+        ? [NSString stringWithFormat:@"%@ has been timed out for %@.", login, durationText(duration.longLongValue)]
+        : [NSString stringWithFormat:@"%@ has been banned.", login];
+    FMLogFirst(3, "React Native chat: %{public}@", text);
+    return [NSString stringWithFormat:@"@msg-id=freemote_moderation;room-id=%@;tmi-sent-ts=%@ :tmi.twitch.tv NOTICE %@ :%@", channelID, sentTs, words[2], text];
+}
+
 // "@<tags> :<prefix> <command> <params> :<text>". Starts loading the channel's emotes from any line with a room-id
 // (ROOMSTATE comes right after joining), and adds them to PRIVMSG and USERNOTICE lines.
 static NSString *ircLineWithEmotes(NSString *line) {
@@ -1027,6 +1087,9 @@ static NSString *ircLineWithEmotes(NSString *line) {
     NSString *rest = [line substringFromIndex:NSMaxRange(tagsEnd)];
     NSArray<NSString *> *words = [rest componentsSeparatedByString:@" "];
     NSString *command = words.count > 1 ? words[1] : nil;
+    // Has no room-id
+    if([command isEqualToString:@"USERSTATE"] && words.count > 2)
+        noteUserState(tags, words[2]);
 
     NSString *channelID, *emotes = @"";
     NSUInteger emotesIndex = NSNotFound;
@@ -1047,6 +1110,10 @@ static NSString *ircLineWithEmotes(NSString *line) {
     }
     if([command isEqualToString:@"ROOMSTATE"])
         FMChannelPointsCheckChannel(channelID);
+    if([command isEqualToString:@"CLEARCHAT"]) {
+        NSString *notice = timeoutNoticeLine(tags, rest, words, channelID);
+        return notice ? [NSString stringWithFormat:@"%@\r\n%@", line, notice] : line;
+    }
     if(![command isEqualToString:@"PRIVMSG"] && ![command isEqualToString:@"USERNOTICE"])
         return line;
 
@@ -1263,6 +1330,141 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     return channelID;
 }
 
+#pragma mark - Deleted messages (native chat)
+
+// Native chat takes a message out when Kotlin hands Swift a MessageDeleted event, and all of a user's messages on a
+// UserMessagesCleared one (a timeout or ban). Swift skips either when its ID is empty, so they're swapped for copies with
+// an empty ID, and the messages stay, dimmed by the MessageStringView hook. Timeout and ban notices are other events.
+// A /clear (MessagesCleared) empties chat and adds Twitch's "Chat was cleared by a moderator" in one go, so keeping chat
+// means it's swapped for a MessageDeleted with an empty ID, which Swift does nothing with.
+static Class MessageDeleted, UserMessagesCleared, MessagesCleared, MessageStringViewClass, MessageStringLayerClass;
+static NSCache<NSString *, NSNumber *> *deletedMessageIDs;
+// User ID -> channel ID ("" if unknown) -> when their messages were cleared there. @synchronized
+static NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSDate *> *> *userClearDates;
+static atomic_bool keptDeletedMessages; // whether anything is dimmed at all
+
+#define FMDeletedMessageAlpha 0.45
+
+static void dimIfDeleted(MessageStringView *view);
+
+static void dimDeletedMessagesInView(UIView *view) {
+    if([view isKindOfClass:MessageStringViewClass])
+        dimIfDeleted((MessageStringView *)view);
+    for(UIView *subview in view.subviews)
+        dimDeletedMessagesInView(subview);
+}
+
+// Rows already on screen. A ban wave can bring hundreds of events at once, so only one walk is queued at a time.
+static atomic_bool deletedMessagesRefreshQueued;
+
+static void refreshDeletedMessages(void) {
+    if(atomic_exchange(&deletedMessagesRefreshQueued, true))
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&deletedMessagesRefreshQueued, false);
+        for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if([scene isKindOfClass:[UIWindowScene class]])
+                for(UIWindow *window in ((UIWindowScene *)scene).windows)
+                    dimDeletedMessagesInView(window);
+        }
+    });
+}
+
+static id eventKeepingMessages(id event, NSString *channelName) {
+    // Every chat event comes through here, so the setting is only read for these (isKindOfClass: of nil is NO)
+    if(![event isKindOfClass:MessageDeleted] && ![event isKindOfClass:UserMessagesCleared] && ![event isKindOfClass:MessagesCleared])
+        return event;
+    if(![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
+        return event;
+    if(MessageDeleted && [event isKindOfClass:MessageDeleted]) {
+        KMPMCChannelEventChatChannelMessageDeleted *deleted = event;
+        NSString *messageID = deleted.messageId;
+        if(![messageID isKindOfClass:[NSString class]] || !messageID.length)
+            return event;
+        [deletedMessageIDs setObject:@YES forKey:messageID];
+        atomic_store(&keptDeletedMessages, true);
+        FMLogFirst(1, "Kept a deleted message in native chat");
+        refreshDeletedMessages();
+        return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:deleted.senderLoginName deletedMessageContent:deleted.deletedMessageContent];
+    }
+    if(UserMessagesCleared && [event isKindOfClass:UserMessagesCleared]) {
+        NSString *userID = ((KMPMCChannelEventChatChannelUserMessagesCleared *)event).clearUserId;
+        if(![userID isKindOfClass:[NSString class]] || !userID.length)
+            return event;
+        NSString *channelID, *name = channelKey(channelName);
+        @synchronized(channelIDsByName) {
+            channelID = name ? channelIDsByName[name] : nil;
+        }
+        @synchronized(userClearDates) {
+            if(userClearDates.count > 5000)
+                [userClearDates removeAllObjects];
+            NSMutableDictionary<NSString *, NSDate *> *dates = userClearDates[userID];
+            if(!dates)
+                userClearDates[userID] = dates = [[NSMutableDictionary alloc] init];
+            dates[channelID ?: @""] = [NSDate date];
+        }
+        atomic_store(&keptDeletedMessages, true);
+        FMLogFirst(1, "Kept a timed out or banned user's messages in native chat");
+        refreshDeletedMessages();
+        return [[UserMessagesCleared alloc] initWithClearUserId:@""];
+    }
+    if(MessagesCleared && [event isKindOfClass:MessagesCleared]) {
+        FMLogFirst(1, "Kept native chat through a /clear");
+        return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:nil deletedMessageContent:nil];
+    }
+    return event;
+}
+
+static BOOL isDeletedMessage(TWChatMessage *message) {
+    if(![message respondsToSelector:@selector(messageID)] || ![message respondsToSelector:@selector(senderId)] || ![message respondsToSelector:@selector(date)])
+        return NO;
+    NSString *messageID = message.messageID;
+    if([messageID isKindOfClass:[NSString class]] && [deletedMessageIDs objectForKey:messageID])
+        return YES;
+    id senderID = message.senderId;
+    if(!senderID)
+        return NO;
+    // Only a timeout or ban in the message's own channel, when it's known (live messages)
+    NSString *channelID = [messageID isKindOfClass:[NSString class]] ? [channelIDsByMessageID objectForKey:messageID] : nil;
+    NSDate *cleared;
+    @synchronized(userClearDates) {
+        NSDictionary<NSString *, NSDate *> *dates = userClearDates[[NSString stringWithFormat:@"%@", senderID]];
+        if(channelID)
+            cleared = dates[channelID] ?: dates[@""];
+        else
+            for(NSDate *date in dates.allValues)
+                cleared = !cleared || [date compare:cleared] == NSOrderedDescending ? date : cleared;
+    }
+    // Only what they sent before it (with a second for the server's clock), not after a timeout runs out
+    NSDate *sent = message.date;
+    return cleared && [sent isKindOfClass:[NSDate class]] && [sent timeIntervalSinceDate:cleared] <= 1;
+}
+
+static TWChatMessage *chatMessageInView(MessageStringView *view) {
+    for(CALayer *layer in view.layer.sublayers) {
+        if(![layer isKindOfClass:MessageStringLayerClass])
+            continue;
+        TWChatMessageString *messageString = swiftIvar(layer, "messageString");
+        return [messageString respondsToSelector:@selector(chatMessage)] ? messageString.chatMessage : nil;
+    }
+    return nil;
+}
+
+static void dimIfDeleted(MessageStringView *view) {
+    BOOL deleted = atomic_load(&keptDeletedMessages) && isDeletedMessage(chatMessageInView(view));
+    if(deleted) {
+        if(!view.freemote_dimmed) {
+            view.freemote_undimmedAlpha = view.alpha;
+            view.freemote_dimmed = YES;
+        }
+        // Each time, in case Twitch set the view's alpha since
+        view.alpha = FMDeletedMessageAlpha;
+    } else if(view.freemote_dimmed) {
+        view.freemote_dimmed = NO;
+        view.alpha = view.freemote_undimmedAlpha;
+    }
+}
+
 %group KMP
 
 %hook KMPMCChatEvent
@@ -1271,6 +1473,7 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
 - (id)event {
     id event = %orig;
     logChatEventType(event, self.channelName);
+    event = eventKeepingMessages(event, self.channelName);
     if(![event isKindOfClass:MessagesReceived])
         return event;
 
@@ -1319,6 +1522,19 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
 }
 
 %end
+
+%end
+
+// Chat rows are reused, and a row lays its text out again when it gets a new message
+%hook MessageStringView
+
+%property (nonatomic, assign) BOOL freemote_dimmed;
+%property (nonatomic, assign) CGFloat freemote_undimmedAlpha;
+
+- (void)layoutSubviews {
+    %orig;
+    dimIfDeleted(self);
+}
 
 %end
 
@@ -1436,6 +1652,23 @@ static void hookKMPIfNeeded(void) {
         TextToken = objc_getClass("KMPMCMessageTokenTextToken");
         EmoteToken = objc_getClass("KMPMCMessageTokenEmoteToken");
         MessagesReceived = objc_getClass("KMPMCChannelEventChatChannelMessagesReceived");
+        Class messageDeleted = objc_getClass("KMPMCChannelEventChatChannelMessageDeleted");
+        Class userMessagesCleared = objc_getClass("KMPMCChannelEventChatChannelUserMessagesCleared");
+        [messageDeleted class];
+        [userMessagesCleared class];
+        if(class_getInstanceMethod(messageDeleted, @selector(messageId))
+           && class_getInstanceMethod(messageDeleted, @selector(senderLoginName))
+           && class_getInstanceMethod(messageDeleted, @selector(deletedMessageContent))
+           && class_getInstanceMethod(messageDeleted, @selector(initWithMessageId:senderLoginName:deletedMessageContent:))
+           && class_getInstanceMethod(userMessagesCleared, @selector(clearUserId))
+           && class_getInstanceMethod(userMessagesCleared, @selector(initWithClearUserId:))) {
+            MessageDeleted = messageDeleted;
+            UserMessagesCleared = userMessagesCleared;
+            MessagesCleared = objc_getClass("KMPMCChannelEventChatChannelMessagesCleared");
+            [MessagesCleared class];
+        } else {
+            FMLog("KMPMobileChat deleted message events changed, native chat removes deleted messages");
+        }
         [messageInfo class];
         [chatEvent class];
         [liveMessage class];
@@ -1677,5 +1910,11 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     channelIDsByVideoID = [[NSCache alloc] init];
     channelIDsByNonce = [[NSCache alloc] init];
     channelIDsByNonce.countLimit = 100;
-    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"), NSURLSessionWebSocketTask = objc_getClass("__NSURLSessionWebSocketTask") ?: [NSURLSessionWebSocketTask class]);
+    deletedMessageIDs = [[NSCache alloc] init];
+    deletedMessageIDs.countLimit = 5000;
+    userClearDates = [[NSMutableDictionary alloc] init];
+    moderatedChannels = [[NSMutableSet alloc] init];
+    MessageStringViewClass = objc_getClass("_TtC6Twitch17MessageStringView");
+    MessageStringLayerClass = objc_getClass("_TtC6Twitch18MessageStringLayer");
+    %init(MessageStringView = MessageStringViewClass, ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"), NSURLSessionWebSocketTask = objc_getClass("__NSURLSessionWebSocketTask") ?: [NSURLSessionWebSocketTask class]);
 }

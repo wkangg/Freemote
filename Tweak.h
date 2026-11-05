@@ -27,6 +27,20 @@
 @property (readonly) NSArray<KMPMCChatLiveMessage *> *messageList;
 @end
 
+// A moderator deleted one message (CLEARMSG)
+@interface KMPMCChannelEventChatChannelMessageDeleted : NSObject
+@property (readonly) NSString *messageId;
+@property (readonly) NSString *senderLoginName;
+@property (readonly) NSString *deletedMessageContent;
+- (instancetype)initWithMessageId:(NSString *)messageId senderLoginName:(NSString *)senderLoginName deletedMessageContent:(NSString *)deletedMessageContent;
+@end
+
+// A user was timed out or banned, which clears their messages (CLEARCHAT with a user)
+@interface KMPMCChannelEventChatChannelUserMessagesCleared : NSObject
+@property (readonly) NSString *clearUserId;
+- (instancetype)initWithClearUserId:(NSString *)clearUserId;
+@end
+
 // What ChatConnectionManager.observeChatEvents() emits: one channel's event
 @interface KMPMCChatEvent : NSObject
 @property (readonly) NSString *channelName;
@@ -42,6 +56,24 @@
 // A chat message's text, laid out by Twitch's MessageStringLayoutManager
 @interface TWMessageString : NSObject
 @property (readonly) NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteLocationsMap; // character index -> emote
+@end
+
+// TwitchKit's chat message, as Twitch's native chat draws it
+@interface TWChatMessage : NSObject
+@property (readonly) NSString *messageID;
+@property (readonly) id senderId;
+@property (readonly) NSDate *date;
+@end
+
+// The text of a native chat message (Twitch.ChatMessageString, a MessageString)
+@interface TWChatMessageString : TWMessageString
+@property (readonly) TWChatMessage *chatMessage;
+@end
+
+// Draws a MessageString (Twitch.MessageStringView), e.g. in a chat row
+@interface MessageStringView : UIView
+@property (nonatomic, assign) BOOL freemote_dimmed; // %property
+@property (nonatomic, assign) CGFloat freemote_undimmedAlpha; // %property: its alpha before it was dimmed
 @end
 
 // SocketRocket, which React Native's WebSocket module uses
