@@ -55,7 +55,7 @@ void FMRegisterDefaults(void) {
     if(section == 0)
         return @"Emotes from each provider, global and per channel.";
     if(section == 1)
-        return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed.";
+        return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed. Chat also stays when a moderator clears it.";
     return @"Claims the bonus chest as soon as it shows up, in any chat you have open.\n\n"
            @"Emote and deleted message changes apply after restarting Twitch.\n\nFreemote " FREEMOTE_VERSION;
 }

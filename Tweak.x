@@ -1268,7 +1268,9 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
 // Native chat takes a message out when Kotlin hands Swift a MessageDeleted event, and all of a user's messages on a
 // UserMessagesCleared one (a timeout or ban). Swift skips either when its ID is empty, so they're swapped for copies with
 // an empty ID, and the messages stay, dimmed by the MessageStringView hook. Timeout and ban notices are other events.
-static Class MessageDeleted, UserMessagesCleared, MessageStringViewClass, MessageStringLayerClass;
+// A /clear (MessagesCleared) empties chat and adds Twitch's "Chat was cleared by a moderator" in one go, so keeping chat
+// means it's swapped for a MessageDeleted with an empty ID, which Swift does nothing with.
+static Class MessageDeleted, UserMessagesCleared, MessagesCleared, MessageStringViewClass, MessageStringLayerClass;
 static NSCache<NSString *, NSNumber *> *deletedMessageIDs;
 static NSMutableDictionary<NSString *, NSDate *> *userClearDates; // user ID -> when their messages were cleared, @synchronized
 static atomic_bool keptDeletedMessages; // whether anything is dimmed at all
@@ -1320,6 +1322,10 @@ static id eventKeepingMessages(id event) {
         FMLogFirst(1, "Kept a timed out or banned user's messages in native chat");
         refreshDeletedMessages();
         return [[UserMessagesCleared alloc] initWithClearUserId:@""];
+    }
+    if(MessagesCleared && [event isKindOfClass:MessagesCleared]) {
+        FMLogFirst(1, "Kept native chat through a /clear");
+        return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:nil deletedMessageContent:nil];
     }
     return event;
 }
@@ -1558,6 +1564,8 @@ static void hookKMPIfNeeded(void) {
            && class_getInstanceMethod(userMessagesCleared, @selector(initWithClearUserId:))) {
             MessageDeleted = messageDeleted;
             UserMessagesCleared = userMessagesCleared;
+            MessagesCleared = objc_getClass("KMPMCChannelEventChatChannelMessagesCleared");
+            [MessagesCleared class];
         } else {
             FMLog("KMPMobileChat deleted message events changed, native chat removes deleted messages");
         }
