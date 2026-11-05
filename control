@@ -3,7 +3,7 @@ Name: Freemote
 Depends: mobilesubstrate
 Version: 1.0.0
 Architecture: iphoneos-arm
-Description: Bring BTTV emotes to the iOS Twitch app. PogU.
+Description: Bring BTTV, FFZ and 7TV emotes to the iOS Twitch app. PogU.
 Maintainer: gilesgc
 Author: gilesgc
 Section: Tweaks

@@ -25,7 +25,7 @@ static dispatch_queue_t emoteQueue;
 
 // freemote_<emote ID>, then _<width per 100 of height> for an emote that isn't square: the React Native screen's chat
 // only gets the ID, so our patch to it (FMReactNativePatch.m) reads the emote's width from there
-static NSString *freemoteEmoteID(BTTVEmote *emote) {
+static NSString *freemoteEmoteID(FMEmote *emote) {
     long width = MAX(1, lround(emote.aspectRatio * 100));
     if(emote.aspectRatio <= 0 || width == 100)
         return [FMEmoteIDPrefix stringByAppendingString:emote.emoteID];
@@ -96,7 +96,7 @@ static NSString *codePointsOf(NSString *word) {
 
 // For finding other characters that keep a word from matching: logs words that are an emote name once everything but
 // letters and digits is taken out
-static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
+static void logNearMiss(NSString *word, NSDictionary<NSString *, FMEmote *> *nameRegistry) {
     if([word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
         return;
     NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
@@ -106,7 +106,7 @@ static void logNearMiss(NSString *word, NSDictionary<NSString *, BTTVEmote *> *n
 
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
 // afterEmote: the text comes right after an emote, which a zero-width emote at its start goes over.
-static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, BOOL afterEmote, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
+static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, FMEmote *> *nameRegistry, BOOL afterEmote, void (^onText)(NSString *text), void (^onEmote)(NSString *name, NSString *emoteID)) {
     // Split at every space, even one a combining mark like U+034F follows: componentsSeparatedByString: doesn't, since
     // it compares composed sequences, so "LOL \u034f" would stay one word
     NSMutableArray<NSString *> *words = [[NSMutableArray alloc] init];
@@ -122,7 +122,7 @@ static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote
     for(NSUInteger i = 0; i < words.count; i++) {
         NSString *word = words[i];
         NSRange nameRange = NSMakeRange(0, word.length);
-        BTTVEmote *emote = nameRegistry[word];
+        FMEmote *emote = nameRegistry[word];
         if(!emote && word.length) {
             nameRange = visibleRange(word);
             if(nameRange.length < word.length && nameRange.length)
@@ -155,7 +155,7 @@ static BOOL splitTextAtEmotes(NSString *text, NSDictionary<NSString *, BTTVEmote
     return foundEmote;
 }
 
-static NSArray *substituteBTTVStringsWithEmoteTokens(NSArray *tokens, NSDictionary<NSString *, BTTVEmote *> *nameRegistry) {
+static NSArray *substituteEmoteNamesWithEmoteTokens(NSArray *tokens, NSDictionary<NSString *, FMEmote *> *nameRegistry) {
     if(nameRegistry.count == 0)
         return tokens;
 
@@ -220,7 +220,7 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
         return url;
 
     NSString *emoteID = emoteIDFromFreemoteID([path substringFromIndex:prefixRange.location + 1].pathComponents.firstObject);
-    NSURL *imageURL = [emoteManager imageURLForBTTVEmoteID:emoteID];
+    NSURL *imageURL = [emoteManager imageURLForEmoteID:emoteID];
     if(!imageURL)
         FMLogFirst(10, "No image for emote %{public}@ (%{public}@)", emoteID, url);
     return imageURL ?: url;
@@ -265,7 +265,7 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
 }
 
 // Whatever's in by the timeout: the providers that answered, or globals at least
-static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *channelID) {
+static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
         FMLog("Chat history for channel %{public}@ is waiting for its emotes", channelID);
         dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
@@ -278,7 +278,7 @@ static NSDictionary<NSString *, BTTVEmote *> *waitForChannelEmotes(NSString *cha
     return [emoteManager emoteNameRegistryForChannel:channelID];
 }
 
-static NSDictionary<NSString *, BTTVEmote *> *waitForVideoEmotes(NSString *videoID) {
+static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID) {
     NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
     if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
         FMLog("VOD chat for video %{public}@ is waiting for its emotes", videoID);
@@ -342,7 +342,7 @@ static BOOL isChatHistoryRequest(NSURLRequest *request) {
     return variablesList.count > 0;
 }
 
-static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
+static NSArray *addEmotesToFragments(NSArray *fragments, NSDictionary<NSString *, FMEmote *> *nameRegistry, NSUInteger *emoteCount) {
     NSMutableArray *newFragments = [[NSMutableArray alloc] init];
     for(NSDictionary *fragment in fragments) {
         // Plain text fragments have no content
@@ -381,7 +381,7 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
     NSArray *messages = json[@"recentChatMessages"];
     if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
         // Otherwise whatever's in so far (globals at least, once they're in)
-        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForEmotes ? waitForChannelEmotes(json[@"id"]) : [emoteManager emoteNameRegistryForChannel:json[@"id"]];
+        NSDictionary<NSString *, FMEmote *> *nameRegistry = waitForEmotes ? waitForChannelEmotes(json[@"id"]) : [emoteManager emoteNameRegistryForChannel:json[@"id"]];
         BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
         NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
@@ -437,7 +437,7 @@ static NSString *withoutJoinedMarks(NSString *text, BOOL afterEmote) {
 
 // VOD comment fragments: plain text has no emote or mention. Emotes say where they are in the message (in code
 // points, `to` inclusive), so offsets are counted over every fragment, as the text ends up after any is taken out.
-static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount) {
+static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionary<NSString *, FMEmote *> *nameRegistry, NSUInteger *emoteCount) {
     NSMutableArray *newFragments = [[NSMutableArray alloc] init];
     __block NSUInteger offset = 0;
     __block BOOL afterEmote = NO;
@@ -516,7 +516,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
 }
 
 // Finds every comments { edges { node { message { messageFragments } } } } in a response
-static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSUInteger *emoteCount, NSUInteger *commentCount) {
+static void addEmotesToVideoComments(id json, NSDictionary<NSString *, FMEmote *> *nameRegistry, NSUInteger *emoteCount, NSUInteger *commentCount) {
     if([json isKindOfClass:[NSArray class]]) {
         for(id item in json)
             addEmotesToVideoComments(item, nameRegistry, emoteCount, commentCount);
@@ -545,12 +545,12 @@ static void addEmotesToVideoComments(id json, NSDictionary<NSString *, BTTVEmote
 #pragma mark - Emote cards
 
 // The emote whose card is open, if it's one of ours. Main thread only.
-static BTTVEmote *emoteCardEmote;
+static FMEmote *emoteCardEmote;
 // The same, for the React Native card, which is laid out off the main thread
-static BTTVEmote *layoutEmoteCardEmote; // @synchronized([BTTVEmote class])
+static FMEmote *layoutEmoteCardEmote; // @synchronized([FMEmote class])
 
 // Our emote that an EmoteCard operation asks for, or nil
-static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
+static FMEmote *emoteCardEmoteFor(NSDictionary *operation) {
     if(![operation isKindOfClass:[NSDictionary class]] || ![@"EmoteCard" isEqual:operation[@"operationName"]])
         return nil;
     NSDictionary *variables = operation[@"variables"];
@@ -558,7 +558,7 @@ static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
     NSString *emoteID = emoteIDFromFreemoteID(freemoteID);
     if(!emoteID)
         return nil;
-    BTTVEmote *emote = emoteManager.emoteRegistry[emoteID];
+    FMEmote *emote = emoteManager.emoteRegistry[emoteID];
     if(!emote)
         FMLogFirst(10, "Emote card for unknown emote %{public}@", freemoteID);
     return emote;
@@ -567,7 +567,7 @@ static BTTVEmote *emoteCardEmoteFor(NSDictionary *operation) {
 // Whether the request is an emote card for one of our emotes. Every emote card request switches which card is open.
 static BOOL isEmoteCardRequest(NSURLRequest *request) {
     BOOL isEmoteCard = NO;
-    BTTVEmote *emote;
+    FMEmote *emote;
     for(NSDictionary *operation in gqlOperations(request)) {
         if([operation isKindOfClass:[NSDictionary class]] && [@"EmoteCard" isEqual:operation[@"operationName"]]) {
             isEmoteCard = YES;
@@ -579,7 +579,7 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
 
     if(emote)
         FMLog("Holding back the emote card for %{public}@ (%{public}@)", emote.emoteText, emote.emoteID);
-    @synchronized([BTTVEmote class]) {
+    @synchronized([FMEmote class]) {
         layoutEmoteCardEmote = emote;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -594,7 +594,7 @@ static void addEmoteCards(id json, NSURLRequest *request) {
     NSArray *operations = gqlOperations(request);
     NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
     for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        BTTVEmote *emote = emoteCardEmoteFor(operations[i]);
+        FMEmote *emote = emoteCardEmoteFor(operations[i]);
         NSMutableDictionary *response = responses[i];
         if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
             continue;
@@ -623,7 +623,7 @@ static NSString *pageURLText(NSURL *pageURL) {
 }
 
 // The made-up card says "Twitch Global Emote": say where the emote is really from, and link to its page
-static void updateEmoteCardTitle(EmoteCardTitleView *titleView, BTTVEmote *emote) {
+static void updateEmoteCardTitle(EmoteCardTitleView *titleView, FMEmote *emote) {
     // Lazy Swift properties: nil until the card first uses them
     UITextView *titleTextView = swiftIvar(titleView, "$__lazy_storage_$_titleTextView");
     UILabel *subtitleLabel = swiftIvar(titleView, "$__lazy_storage_$_subtitleLabel");
@@ -682,8 +682,8 @@ static void updateEmoteCardTitle(EmoteCardTitleView *titleView, BTTVEmote *emote
 %hook RCTTextLayoutManager
 
 - (NSTextStorage *)_textStorageAndLayoutManagerWithAttributesString:(NSAttributedString *)attributedString paragraphAttributes:(void *)paragraphAttributes size:(CGSize)size {
-    BTTVEmote *emote;
-    @synchronized([BTTVEmote class]) {
+    FMEmote *emote;
+    @synchronized([FMEmote class]) {
         emote = layoutEmoteCardEmote;
     }
     if(emote && [attributedString.string isEqualToString:@"Twitch Global Emote"]) {
@@ -771,7 +771,7 @@ static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL 
     NSString *videoID = chatHistoryVideoID(request);
     if(videoID) {
         NSDate *start = [NSDate date];
-        NSDictionary<NSString *, BTTVEmote *> *nameRegistry = waitForVideoEmotes(videoID);
+        NSDictionary<NSString *, FMEmote *> *nameRegistry = waitForVideoEmotes(videoID);
         NSUInteger emoteCount = 0, commentCount = 0;
         addEmotesToVideoComments(json, nameRegistry, &emoteCount, &commentCount);
         // No comments means the response shape changed
@@ -891,7 +891,7 @@ static NSIndexSet *ircEmotePositions(NSString *emotes) {
 }
 
 // Our emotes in the text as <id>:<from>-<to>,.../..., or nil if there are none
-static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, BTTVEmote *> *nameRegistry, NSIndexSet *taken, NSUInteger *emoteCount) {
+static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, FMEmote *> *nameRegistry, NSIndexSet *taken, NSUInteger *emoteCount) {
     NSMutableArray<NSString *> *emoteIDs = [[NSMutableArray alloc] init];
     NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *ranges = [[NSMutableDictionary alloc] init];
     // Where the next piece starts in the text. The pieces leave out the space before a zero-width emote, so emotes
@@ -1002,11 +1002,11 @@ static dispatch_queue_t reactNativeEmoteQueue; // serial, so a channel's last ta
 // Only on reactNativeEmoteQueue
 static void sendEmoteTableNow(NSString *channelID) {
     RCTInstance *instance = reactInstance;
-    NSDictionary<NSString *, BTTVEmote *> *nameRegistry = emoteManager.channelNameRegistries[channelID];
+    NSDictionary<NSString *, FMEmote *> *nameRegistry = emoteManager.channelNameRegistries[channelID];
     if(!atomic_load(&reactNativeReadyForEmotes) || !instance || !nameRegistry)
         return;
     NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionaryWithCapacity:nameRegistry.count];
-    [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, BTTVEmote *emote, BOOL *stop) {
+    [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, FMEmote *emote, BOOL *stop) {
         names[name] = freemoteEmoteID(emote);
     }];
     [instance callFunctionOnJSModule:@"Freemote" method:@"setEmotes" args:@[channelID, names]];
@@ -1186,7 +1186,7 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     if(!channelID)
         FMLogFirst(10, "Message has no known channel, using global emotes: %{public}@", describeChatMessage(self, tokens));
 
-    return substituteBTTVStringsWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
+    return substituteEmoteNamesWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
 }
 
 %end
@@ -1371,7 +1371,7 @@ static void joinedChannel(id channelID) {
 // Set once the image sizes are replaced: widening the attachments without them would draw images over the text
 static Class MessageStringLayoutManager;
 
-static BTTVEmote *emoteForToken(TWMessageEmoteToken *token) {
+static FMEmote *emoteForToken(TWMessageEmoteToken *token) {
     NSString *emoteID = emoteIDFromFreemoteID([token respondsToSelector:@selector(emoteId)] ? token.emoteId : nil);
     return emoteID ? emoteManager.emoteRegistry[emoteID] : nil;
 }
@@ -1382,7 +1382,7 @@ static NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteTokens(TWMessageStr
 }
 
 // Our emotes keep Twitch's height, with their own width
-static CGSize emoteImageSize(BTTVEmote *emote, CGSize size) {
+static CGSize emoteImageSize(FMEmote *emote, CGSize size) {
     if(emote.aspectRatio > 0)
         size.width = MAX(1, floor(size.height * emote.aspectRatio));
     return size;
@@ -1394,7 +1394,7 @@ typedef __attribute__((swiftcall)) CGSize (*FMImageSizeFunction)(NSInteger index
 static FMImageSizeFunction originalMessageStringImageSize, originalChatMessageStringImageSize;
 
 static CGSize messageStringImageSize(void *messageString, NSInteger index, CGSize size) {
-    BTTVEmote *emote = emoteForToken(emoteTokens((__bridge TWMessageString *)messageString)[@(index)]);
+    FMEmote *emote = emoteForToken(emoteTokens((__bridge TWMessageString *)messageString)[@(index)]);
     return emote ? emoteImageSize(emote, size) : size;
 }
 

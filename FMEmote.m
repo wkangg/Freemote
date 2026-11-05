@@ -1,6 +1,6 @@
-#import "BTTVEmote.h"
+#import "FMEmote.h"
 
-@implementation BTTVEmote
+@implementation FMEmote
 
 - (id)initWithDictData:(NSDictionary *)data emoteType:(EmoteType)type {
     self = [super init];

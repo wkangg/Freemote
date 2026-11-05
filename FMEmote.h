@@ -4,7 +4,7 @@ typedef enum {
     BTTV, FFZ, BTTVGlobal, FFZGlobal, SevenTV, SevenTVGlobal
 } EmoteType;
 
-@interface BTTVEmote : NSObject
+@interface FMEmote : NSObject
 @property (nonatomic, retain) NSString *emoteText;
 @property (nonatomic, retain) NSString *emoteID;
 @property (nonatomic, retain) NSURL *image1x;
