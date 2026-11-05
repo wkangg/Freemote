@@ -1,7 +1,8 @@
 #import <UIKit/UIKit.h>
 
-// NSUserDefaults keys, all on by default. The emote and deleted message ones are read when emotes and the React Native
-// screen load, so a change applies after restarting Twitch. Claiming channel points is checked on each claim.
+// NSUserDefaults keys, all on by default. The emote ones are read when emotes load, and the deleted message one when the
+// React Native screen loads, so those apply after restarting Twitch. Native chat checks deleted messages on each one, and
+// channel points on each claim.
 extern NSString *const FMBTTVEnabledKey;
 extern NSString *const FMFFZEnabledKey;
 extern NSString *const FMSevenTVEnabledKey;
