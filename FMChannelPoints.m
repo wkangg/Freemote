@@ -1,6 +1,14 @@
 #import "FMChannelPoints.h"
 #import "FMLog.h"
 #import "FMSettings.h"
+#import <objc/runtime.h>
+
+// The React Native screen's native module for Twitch's integrity token (Twitch's TwitchRNIntegrity), which it gets from
+// TKGraphQL. Twitch fails a claim without one: "failed integrity check". The resolve block gets the token.
+@interface TwitchRNIntegrity : NSObject
+- (void)getIntegrityToken:(void (^)(id result))resolve rejecter:(void (^)(NSString *code, NSString *message, NSError *error))reject;
+- (void)refreshIntegrityToken:(void (^)(id result))resolve rejecter:(void (^)(NSString *code, NSString *message, NSError *error))reject;
+@end
 
 // Twitch 31.x's own operations (TwitchGraphQLAPI's ClaimChannelPoints and ChannelPoints), by their persisted query
 // hashes. If the server stops knowing a hash, the query is sent as text instead (ours leaves out what isn't used, and
@@ -46,8 +54,8 @@ static id valueAt(id json, NSArray<NSString *> *path) {
     return json;
 }
 
-// Calls completion on pointsQueue with the response's data, or nil
-static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *operationName, NSString *hash, NSString *query, NSDictionary *variables, void (^completion)(NSDictionary *data)) {
+// Calls completion on pointsQueue with the response's data, or nil and the error message if there is one
+static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *integrityToken, NSString *operationName, NSString *hash, NSString *query, NSDictionary *variables, void (^completion)(NSDictionary *data, NSString *errorMessage)) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gql.twitch.tv/gql"]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 10;
@@ -55,6 +63,8 @@ static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *operationNa
         [request setValue:[NSString stringWithFormat:@"%@", value] forHTTPHeaderField:name];
     }];
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    if(integrityToken)
+        [request setValue:integrityToken forHTTPHeaderField:@"Client-Integrity"];
     NSMutableDictionary *body = [@{@"operationName": operationName, @"variables": variables} mutableCopy];
     if(hash)
         body[@"extensions"] = @{@"persistedQuery": @{@"version": @1, @"sha256Hash": hash}};
@@ -69,7 +79,7 @@ static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *operationNa
         message = [message isKindOfClass:[NSString class]] ? message : nil;
         if(hash && [message containsString:@"PersistedQuery"]) {
             FMLog("Twitch doesn't know the %{public}@ hash (%{public}@), sending it as text", operationName, message);
-            sendGQL(headers, operationName, nil, query, variables, completion);
+            sendGQL(headers, integrityToken, operationName, nil, query, variables, completion);
             return;
         }
         NSDictionary *data = valueAt(json, @[@"data"]);
@@ -78,7 +88,7 @@ static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *operationNa
             data = nil;
         }
         dispatch_async(pointsQueue(), ^{
-            completion(data);
+            completion(data, message);
         });
     }] resume];
 }
@@ -88,26 +98,71 @@ static NSDictionary<NSString *, id> *claimHeaders(void) {
     return nativeHeaders ?: reactHeaders;
 }
 
+static void receiveIntegrityToken(TwitchRNIntegrity *module, BOOL refresh, void (^completion)(NSString *token)) {
+    void (^resolve)(id) = ^(id result) {
+        NSString *token = [result isKindOfClass:[NSDictionary class]] ? result[@"token"] : result;
+        if(![token isKindOfClass:[NSString class]] || !token.length) {
+            FMLog("No integrity token from %{public}s (%{public}@)", refresh ? "refreshIntegrityToken" : "getIntegrityToken", result ? NSStringFromClass([result class]) : @"nil");
+            token = nil;
+        }
+        completion(token);
+    };
+    void (^reject)(NSString *, NSString *, NSError *) = ^(NSString *code, NSString *message, NSError *error) {
+        FMLog("Couldn't get an integrity token: %{public}@ %{public}@", code, message ?: error.localizedDescription);
+        completion(nil);
+    };
+    if(refresh)
+        [module refreshIntegrityToken:resolve rejecter:reject];
+    else
+        [module getIntegrityToken:resolve rejecter:reject];
+}
+
+// Calls completion on pointsQueue with Twitch's integrity token, or nil. refresh: a new one, since the last was refused.
+static void integrityToken(BOOL refresh, void (^completion)(NSString *token)) {
+    void (^done)(NSString *) = ^(NSString *token) {
+        dispatch_async(pointsQueue(), ^{
+            completion(token);
+        });
+    };
+    // React Native makes its modules on the main thread
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static TwitchRNIntegrity *module;
+        Class moduleClass = objc_getClass("TwitchRNIntegrity");
+        if(!module && [moduleClass instancesRespondToSelector:@selector(getIntegrityToken:rejecter:)] && [moduleClass instancesRespondToSelector:@selector(refreshIntegrityToken:rejecter:)])
+            module = [[moduleClass alloc] init];
+        if(!module) {
+            FMLogFirst(1, "No TwitchRNIntegrity, claiming channel points without an integrity token");
+            done(nil);
+            return;
+        }
+        // The current token, or a new one if there's none yet
+        receiveIntegrityToken(module, refresh, ^(NSString *token) {
+            if(token || refresh)
+                done(token);
+            else
+                receiveIntegrityToken(module, YES, done);
+        });
+    });
+}
+
 // How long to wait before trying a claim that didn't get through once more: Hermes won't say it's there again
 #define FMClaimRetryDelay 5
 
-// Only on pointsQueue
-static void claim(NSString *channelID, NSString *claimID, BOOL retry) {
-    if(!claimingEnabled() || [claimIDs containsObject:claimID])
-        return;
-    NSDictionary *headers = claimHeaders();
-    if(!headers) {
-        FMLog("Channel points bonus in channel %{public}@, but no signed-in request to claim it with yet", channelID);
-        return;
-    }
-    if(claimIDs.count > 100)
-        [claimIDs removeAllObjects];
-    [claimIDs addObject:claimID];
-    FMLog("Claiming the channel points bonus in channel %{public}@", channelID);
-    sendGQL(headers, @"ClaimChannelPoints", FMClaimHash, FMClaimQuery, @{@"input": @{@"channelID": channelID, @"claimID": claimID}}, ^(NSDictionary *data) {
+static void claim(NSString *channelID, NSString *claimID, BOOL retry);
+
+// Only on pointsQueue. refreshed: the token is a new one already, so an integrity failure isn't tried again.
+static void sendClaim(NSString *channelID, NSString *claimID, NSString *token, BOOL refreshed, BOOL retry) {
+    sendGQL(claimHeaders(), token, @"ClaimChannelPoints", FMClaimHash, FMClaimQuery, @{@"input": @{@"channelID": channelID, @"claimID": claimID}}, ^(NSDictionary *data, NSString *errorMessage) {
         NSDictionary *result = valueAt(data, @[@"claimCommunityPoints"]);
         id errorCode = valueAt(result, @[@"error", @"code"]);
         if(![result isKindOfClass:[NSDictionary class]]) {
+            if(!refreshed && [errorMessage rangeOfString:@"integrity" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                FMLog("Claiming again with a new integrity token");
+                integrityToken(YES, ^(NSString *newToken) {
+                    sendClaim(channelID, claimID, newToken, YES, retry);
+                });
+                return;
+            }
             // Didn't get through: it can be tried again
             [claimIDs removeObject:claimID];
             if(retry) {
@@ -125,6 +180,23 @@ static void claim(NSString *channelID, NSString *claimID, BOOL retry) {
 }
 
 // Only on pointsQueue
+static void claim(NSString *channelID, NSString *claimID, BOOL retry) {
+    if(!claimingEnabled() || [claimIDs containsObject:claimID])
+        return;
+    if(!claimHeaders()) {
+        FMLog("Channel points bonus in channel %{public}@, but no signed-in request to claim it with yet", channelID);
+        return;
+    }
+    if(claimIDs.count > 100)
+        [claimIDs removeAllObjects];
+    [claimIDs addObject:claimID];
+    FMLog("Claiming the channel points bonus in channel %{public}@", channelID);
+    integrityToken(NO, ^(NSString *token) {
+        sendClaim(channelID, claimID, token, NO, retry);
+    });
+}
+
+// Only on pointsQueue
 static void checkChannel(NSString *channelID) {
     NSDictionary *headers = claimHeaders();
     if(!headers) {
@@ -137,7 +209,7 @@ static void checkChannel(NSString *channelID) {
     if(checked && -checked.timeIntervalSinceNow < FMChannelCheckInterval)
         return;
     checkedChannels[channelID] = [NSDate date];
-    sendGQL(headers, @"ChannelPoints", FMChannelPointsHash, FMChannelPointsQuery, @{@"channel": channelID, @"includeSettings": @NO, @"includeUserInfo": @YES}, ^(NSDictionary *data) {
+    sendGQL(headers, nil, @"ChannelPoints", FMChannelPointsHash, FMChannelPointsQuery, @{@"channel": channelID, @"includeSettings": @NO, @"includeUserInfo": @YES}, ^(NSDictionary *data, NSString *errorMessage) {
         NSString *claimID = valueAt(data, @[@"user", @"channel", @"selfView", @"communityPoints", @"availableClaim", @"id"]);
         if([claimID isKindOfClass:[NSString class]] && claimID.length)
             claim(channelID, claimID, YES);
