@@ -1343,6 +1343,9 @@ static void refreshDeletedMessages(void) {
 }
 
 static id eventKeepingMessages(id event, NSString *channelName) {
+    // Every chat event comes through here, so the setting is only read for these (isKindOfClass: of nil is NO)
+    if(![event isKindOfClass:MessageDeleted] && ![event isKindOfClass:UserMessagesCleared] && ![event isKindOfClass:MessagesCleared])
+        return event;
     if(![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
         return event;
     if(MessageDeleted && [event isKindOfClass:MessageDeleted]) {
