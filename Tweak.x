@@ -18,7 +18,8 @@
 
 // How long a chat history or VOD chat response on a native screen is held back waiting for the channel's emotes.
 // React Native chat history isn't held: it gets the emotes that are in by then, and its chat rows add the rest as
-// they load.
+// they load. (Unless Twitch batched it into one request with the emote picker's ChatEmoteSets, which waits up to
+// FMBatchedEmoteSetsTimeout.)
 #define FMHistoryEmoteTimeout 5
 
 // How long the React Native emote picker's emote sets wait for the channel's emotes when other queries were batched
@@ -679,9 +680,10 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
                 return globalA ? NSOrderedDescending : NSOrderedAscending;
             return [a localizedCaseInsensitiveCompare:b];
         }];
-        [counts addObject:[NSString stringWithFormat:@"%@ %lu", providers[i][@"displayName"], (unsigned long)names[i].count]];
-        if(!names[i].count)
+        if(!names[i].count) {
+            [counts addObject:[NSString stringWithFormat:@"%@ 0", providers[i][@"displayName"]]];
             continue;
+        }
 
         // The owner is the same made-up user in every channel; the set (and so its emote list) is per channel
         NSString *setID = [NSString stringWithFormat:@"%@%@_%@", FMEmoteIDPrefix, providers[i][@"login"], channelID];
@@ -700,6 +702,7 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
                 @"type": [NSNull null], @"assetType": emote.isAnimated ? @"ANIMATED" : @"STATIC", @"modifiers": @[]
             }];
         }
+        [counts addObject:[NSString stringWithFormat:@"%@ %lu", providers[i][@"displayName"], (unsigned long)emotes.count]];
         NSMutableDictionary *owner = [providers[i] mutableCopy];
         owner[@"__typename"] = @"User";
         owner[@"id"] = [FMEmoteIDPrefix stringByAppendingString:providers[i][@"login"]];
