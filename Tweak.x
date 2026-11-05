@@ -103,7 +103,7 @@ static void logNearMiss(NSString *word, NSDictionary<NSString *, FMEmote *> *nam
         return;
     NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
     if(stripped.length && nameRegistry[stripped])
-        FMLogFirst(10, "Word looks like emote %{public}@ but doesn't match: %{public}@", stripped, codePointsOf(word));
+        FMLogFirst(10, "Word looks like emote %@ but doesn't match: %@", stripped, codePointsOf(word));
 }
 
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
@@ -224,7 +224,7 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
     NSString *emoteID = emoteIDFromFreemoteID([path substringFromIndex:prefixRange.location + 1].pathComponents.firstObject);
     NSURL *imageURL = [emoteManager imageURLForEmoteID:emoteID];
     if(!imageURL)
-        FMLogFirst(10, "No image for emote %{public}@ (%{public}@)", emoteID, url);
+        FMLogFirst(10, "No image for emote %@ (%@)", emoteID, url);
     return imageURL ?: url;
 }
 
@@ -239,7 +239,7 @@ static void loadChannelEmotesNow(NSString *channelID) {
         return;
     NSDate *start = [NSDate date];
     [emoteManager loadEmotesForChannel:channelID];
-    FMLog("Loaded %lu emotes for channel %{public}@ in %.1fs", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID, -start.timeIntervalSinceNow);
+    FMLog("Loaded %lu emotes for channel %@ in %.1fs", (unsigned long)[emoteManager emoteNameRegistryForChannel:channelID].count, channelID, -start.timeIntervalSinceNow);
 }
 
 static void loadChannelEmotes(NSString *channelID, dispatch_block_t completion) {
@@ -269,13 +269,13 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
 // Whatever's in by the timeout: the providers that answered, or globals at least
 static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("Chat history for channel %{public}@ is waiting for its emotes", channelID);
+        FMLog("Chat history for channel %@ is waiting for its emotes", channelID);
         dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
         loadChannelEmotes(channelID, ^{
             dispatch_semaphore_signal(loaded);
         });
         if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for channel %{public}@ chat history", channelID);
+            FMLog("Timed out loading emotes for channel %@ chat history", channelID);
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
 }
@@ -283,13 +283,13 @@ static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *chann
 static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID) {
     NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
     if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("VOD chat for video %{public}@ is waiting for its emotes", videoID);
+        FMLog("VOD chat for video %@ is waiting for its emotes", videoID);
         dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
         loadVideoEmotes(videoID, ^{
             dispatch_semaphore_signal(loaded);
         });
         if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for video %{public}@ chat", videoID);
+            FMLog("Timed out loading emotes for video %@ chat", videoID);
         channelID = [channelIDsByVideoID objectForKey:videoID];
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
@@ -316,7 +316,7 @@ static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL
         if(![operation isKindOfClass:[NSDictionary class]] || ![chatHistoryOperations containsObject:operation[@"operationName"]])
             continue;
         if(log)
-            FMLog("Holding back %{public}@ response to add emotes", operation[@"operationName"]);
+            FMLog("Holding back %@ response to add emotes", operation[@"operationName"]);
         NSDictionary *variables = operation[@"variables"];
         [variablesList addObject:[variables isKindOfClass:[NSDictionary class]] ? variables : @{}];
     }
@@ -404,7 +404,7 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
                 withoutFragments++;
         }
         // Many messages without fragments means the response shape changed
-        FMLog("Chat history for channel %{public}@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, %{public}s)",
+        FMLog("Chat history for channel %@: added %lu emotes to %lu messages (%lu without fragments, %lu emote names, %s)",
               json[@"id"], (unsigned long)emoteCount, (unsigned long)messages.count, (unsigned long)withoutFragments, (unsigned long)nameRegistry.count, loaded ? "all loaded" : "still loading");
         return;
     }
@@ -565,7 +565,7 @@ static FMEmote *emoteCardEmoteFor(NSDictionary *operation) {
         return nil;
     FMEmote *emote = emoteManager.emoteRegistry[emoteID];
     if(!emote)
-        FMLogFirst(10, "Emote card for unknown emote %{public}@", freemoteID);
+        FMLogFirst(10, "Emote card for unknown emote %@", freemoteID);
     return emote;
 }
 
@@ -583,7 +583,7 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
         return NO;
 
     if(emote)
-        FMLog("Holding back the emote card for %{public}@ (%{public}@)", emote.emoteText, emote.emoteID);
+        FMLog("Holding back the emote card for %@ (%@)", emote.emoteText, emote.emoteID);
     @synchronized([FMEmote class]) {
         layoutEmoteCardEmote = emote;
     }
@@ -608,7 +608,7 @@ static void addEmoteCards(id json, NSURLRequest *request) {
             @"type": @"GLOBALS", @"owner": [NSNull null], @"subscriptionProduct": [NSNull null], @"bitsBadgeTierSummary": [NSNull null]
         }};
         [response removeObjectForKey:@"errors"];
-        FMLog("Answered the emote card for %{public}@", emote.emoteText);
+        FMLog("Answered the emote card for %@", emote.emoteText);
     }
 }
 
@@ -757,7 +757,7 @@ static void updateEmoteCardTitle(EmoteCardTitleView *titleView, FMEmote *emote) 
     link.textContainer.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [labelsStackView addArrangedSubview:link];
     titleView.freemote_emoteCardLink = link;
-    FMLog("Added details to the emote card for %{public}@", emote.emoteText);
+    FMLog("Added details to the emote card for %@", emote.emoteText);
 }
 
 %hook EmoteCardTitleView
@@ -792,7 +792,7 @@ static void updateEmoteCardTitle(EmoteCardTitleView *titleView, FMEmote *emote) 
             [newString appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:pageURLText(emote.pageURL)] attributes:attributes]];
         }
         attributedString = newString;
-        FMLogFirst(5, "Replaced the React Native emote card's subtitle for %{public}@", emote.emoteText);
+        FMLogFirst(5, "Replaced the React Native emote card's subtitle for %@", emote.emoteText);
     }
     return %orig(attributedString, paragraphAttributes, size);
 }
@@ -834,7 +834,7 @@ static void addEmoteCardLink(RCTParagraphComponentView *view) {
     tap.cancelsTouchesInView = NO;
     [view addGestureRecognizer:tap];
     view.freemote_emoteCardLinkTap = tap;
-    FMLog("Added a link to the React Native emote card for %{public}@", emoteCardEmote.emoteText);
+    FMLog("Added a link to the React Native emote card for %@", emoteCardEmote.emoteText);
 }
 
 %hook RCTParagraphComponentView
@@ -859,7 +859,7 @@ static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL 
     NSError *error;
     id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
     if(!json) {
-        FMLog("Held back response isn't JSON (%lu bytes), left as is: %{public}@", (unsigned long)data.length, error.localizedDescription);
+        FMLog("Held back response isn't JSON (%lu bytes), left as is: %@", (unsigned long)data.length, error.localizedDescription);
         return data;
     }
     addEmotesToChatHistory(json, waitForEmotes);
@@ -872,13 +872,13 @@ static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL 
         NSUInteger emoteCount = 0, commentCount = 0;
         addEmotesToVideoComments(json, nameRegistry, &emoteCount, &commentCount);
         // No comments means the response shape changed
-        FMLog("VOD chat for video %{public}@ (channel %{public}@): added %lu emotes to %lu comments (%lu emote names, waited %.1fs)",
+        FMLog("VOD chat for video %@ (channel %@): added %lu emotes to %lu comments (%lu emote names, waited %.1fs)",
               videoID, [channelIDsByVideoID objectForKey:videoID], (unsigned long)emoteCount, (unsigned long)commentCount, (unsigned long)nameRegistry.count, -start.timeIntervalSinceNow);
     }
 
     NSData *newData = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
     if(!newData)
-        FMLog("Couldn't serialize held back response, left as is: %{public}@", error.localizedDescription);
+        FMLog("Couldn't serialize held back response, left as is: %@", error.localizedDescription);
     return newData ?: data;
 }
 
@@ -912,7 +912,7 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
         return nil;
     objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if(error)
-        FMLog("Held back request failed, left as is: %{public}@", error.localizedDescription);
+        FMLog("Held back request failed, left as is: %@", error.localizedDescription);
     return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest, waitForEmotes);
 }
 
@@ -1073,7 +1073,7 @@ static NSString *timeoutNoticeLine(NSArray<NSString *> *tags, NSString *rest, NS
     NSString *text = duration.longLongValue > 0
         ? [NSString stringWithFormat:@"%@ has been timed out for %@.", login, durationText(duration.longLongValue)]
         : [NSString stringWithFormat:@"%@ has been banned.", login];
-    FMLogFirst(3, "React Native chat: %{public}@", text);
+    FMLogFirst(3, "React Native chat: %@", text);
     return [NSString stringWithFormat:@"@msg-id=freemote_moderation;room-id=%@;tmi-sent-ts=%@ :tmi.twitch.tv NOTICE %@ :%@", channelID, sentTs, words[2], text];
 }
 
@@ -1105,7 +1105,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
         return line;
     if(![emoteManager hasEmotesForChannel:channelID]) {
         if([command isEqualToString:@"ROOMSTATE"])
-            FMLog("React Native chat joined channel %{public}@", channelID);
+            FMLog("React Native chat joined channel %@", channelID);
         loadChannelEmotes(channelID, nil);
     }
     if([command isEqualToString:@"ROOMSTATE"])
@@ -1134,7 +1134,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
         tags[emotesIndex] = tag;
     else
         [tags addObject:tag];
-    FMLogFirst(5, "React Native chat: added %lu emotes to a %{public}@ in channel %{public}@", (unsigned long)emoteCount, command, channelID);
+    FMLogFirst(5, "React Native chat: added %lu emotes to a %@ in channel %@", (unsigned long)emoteCount, command, channelID);
     return [NSString stringWithFormat:@"@%@ %@", [tags componentsJoinedByString:@";"], rest];
 }
 
@@ -1195,7 +1195,7 @@ static void sendEmoteTableNow(NSString *channelID) {
         names[name] = freemoteEmoteID(emote);
     }];
     [instance callFunctionOnJSModule:@"Freemote" method:@"setEmotes" args:@[channelID, names]];
-    FMLogFirst(10, "Sent %lu emote names for channel %{public}@ to React Native", (unsigned long)names.count, channelID);
+    FMLogFirst(10, "Sent %lu emote names for channel %@ to React Native", (unsigned long)names.count, channelID);
 }
 
 static void sendEmoteTable(NSString *channelID) {
@@ -1223,7 +1223,7 @@ static void watchForReactNativeReady(void) {
                     reactLogFunction(level, source, fileName, lineNumber, message);
                 return;
             }
-            FMLog("%{public}@", [message substringFromIndex:NSMaxRange(prefix)]);
+            FMLog("%@", [message substringFromIndex:NSMaxRange(prefix)]);
             if(![message hasSuffix:FMReactNativeReadyMessage])
                 return;
             atomic_store(&reactNativeReadyForEmotes, true);
@@ -1246,7 +1246,7 @@ static void watchForReactNativeReady(void) {
         FMLog("RCTInstance changed, React Native emotes stay square");
     else if(![[NSString stringWithFormat:@"globalThis.freemoteKeepDeletedMessages = %@;\n%@", [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey] ? @"true" : @"false", FMReactNativePatchSource]
                 writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
-        FMLog("Couldn't write the React Native patch, emotes stay square: %{public}@", error.localizedDescription);
+        FMLog("Couldn't write the React Native patch, emotes stay square: %@", error.localizedDescription);
     else {
         // A new runtime: wait for its patch to say it's ready
         atomic_store(&reactNativeReadyForEmotes, false);
@@ -1290,7 +1290,7 @@ static void logChatEventType(id event, NSString *channelName) {
             return;
         [seenTypes addObject:type];
     }
-    FMLog("First chat event %{public}@ (chat %{public}@)", type, channelName);
+    FMLog("First chat event %@ (chat %@)", type, channelName);
 }
 
 // For figuring out where an untagged message came from
@@ -1326,7 +1326,7 @@ static NSString *sentMessageChannelID(KMPMCChatMessageInfo *messageInfo) {
     @synchronized(channelIDsByName) {
         channelID = lastSentChannelID;
     }
-    FMLogFirst(5, "Sent message's nonce %{public}@ is unknown, using the last chat sent to (%{public}@)", nonce, channelID);
+    FMLogFirst(5, "Sent message's nonce %@ is unknown, using the last chat sent to (%@)", nonce, channelID);
     return channelID;
 }
 
@@ -1484,7 +1484,7 @@ static void dimIfDeleted(MessageStringView *view) {
         joinedNames = channelID ? nil : channelIDsByName.allKeys;
     }
     if(!channelID) {
-        FMLogFirst(5, "No channel ID for chat %{public}@ (joined: %{public}@)", channelName, [joinedNames componentsJoinedByString:@", "]);
+        FMLogFirst(5, "No channel ID for chat %@ (joined: %@)", channelName, [joinedNames componentsJoinedByString:@", "]);
         return event;
     }
 
@@ -1516,7 +1516,7 @@ static void dimIfDeleted(MessageStringView *view) {
     if(!channelID)
         channelID = sentMessageChannelID(self);
     if(!channelID)
-        FMLogFirst(10, "Message has no known channel, using global emotes: %{public}@", describeChatMessage(self, tokens));
+        FMLogFirst(10, "Message has no known channel, using global emotes: %@", describeChatMessage(self, tokens));
 
     return substituteEmoteNamesWithEmoteTokens(tokens, [emoteManager emoteNameRegistryForChannel:channelID]);
 }
@@ -1550,11 +1550,11 @@ static void joinedChannel(id channelID);
         @synchronized(channelIDsByName) {
             channelIDsByName[key] = channelID;
         }
-        FMLog("Joining chat %{public}@ (%{public}@)", key, channelID);
+        FMLog("Joining chat %@ (%@)", key, channelID);
     } else if(key.length) {
         // The ID is optional in Kotlin (join(String, String?)), and without it the channel repositories aren't asked
         // either, so look it up by name
-        FMLog("Joining chat %{public}@ without a channel ID", key);
+        FMLog("Joining chat %@ without a channel ID", key);
         dispatch_async(emoteQueue, ^{
             NSString *lookedUpID = [emoteManager.httpClient channelIDForLogin:key];
             if(!isChannelID(lookedUpID))
@@ -1585,7 +1585,7 @@ static void joinedChannel(id channelID);
     }
     if(channelID && [clientNonce isKindOfClass:[NSString class]])
         [channelIDsByNonce setObject:channelID forKey:clientNonce];
-    FMLogFirst(5, "Sending a message to chat %{public}@ (%{public}@, nonce %{public}@)", key, channelID, clientNonce);
+    FMLogFirst(5, "Sending a message to chat %@ (%@, nonce %@)", key, channelID, clientNonce);
     return %orig;
 }
 
@@ -1696,7 +1696,7 @@ static void joinedChannel(id channelID) {
     hookKMPIfNeeded();
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
-    FMLog("Joined channel %{public}@", channel);
+    FMLog("Joined channel %@", channel);
     if(isChannelID(channel)) {
         loadChannelEmotes(channel, nil);
         FMChannelPointsCheckChannel(channel);
@@ -1894,8 +1894,8 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
 %end
 
 %ctor {
-    FMLog("Freemote %{public}s loaded in Twitch %{public}@", FREEMOTE_VERSION, NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]);
     FMRegisterDefaults();
+    FMLog("--- launch: Freemote %s, Twitch %@, %@", FREEMOTE_VERSION, NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"], NSProcessInfo.processInfo.operatingSystemVersionString);
     emoteManager = [[FMEmoteManager alloc] init];
     hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);

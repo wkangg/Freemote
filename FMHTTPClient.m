@@ -40,9 +40,9 @@
     NSDate *start = [NSDate date];
     NSString *ownerID = [self gqlString:@"query($id: ID!) { video(id: $id) { owner { id } } }" variables:@{@"id": videoID} path:@[@"video", @"owner", @"id"]];
     if(!ownerID)
-        FMLog("Couldn't find the owner of video %{public}@ after %.1fs", videoID, -start.timeIntervalSinceNow);
+        FMLog("Couldn't find the owner of video %@ after %.1fs", videoID, -start.timeIntervalSinceNow);
     else
-        FMLog("Video %{public}@ is from channel %{public}@ (%.1fs)", videoID, ownerID, -start.timeIntervalSinceNow);
+        FMLog("Video %@ is from channel %@ (%.1fs)", videoID, ownerID, -start.timeIntervalSinceNow);
     return ownerID;
 }
 
@@ -50,9 +50,9 @@
     NSDate *start = [NSDate date];
     NSString *channelID = [self gqlString:@"query($login: String!) { user(login: $login) { id } }" variables:@{@"login": login} path:@[@"user", @"id"]];
     if(!channelID)
-        FMLog("Couldn't find the channel ID of %{public}@ after %.1fs", login, -start.timeIntervalSinceNow);
+        FMLog("Couldn't find the channel ID of %@ after %.1fs", login, -start.timeIntervalSinceNow);
     else
-        FMLog("Chat %{public}@ is channel %{public}@ (%.1fs)", login, channelID, -start.timeIntervalSinceNow);
+        FMLog("Chat %@ is channel %@ (%.1fs)", login, channelID, -start.timeIntervalSinceNow);
     return channelID;
 }
 
@@ -81,7 +81,7 @@
     for(NSString *key in [@[@"data"] arrayByAddingObjectsFromArray:path])
         value = [value isKindOfClass:[NSDictionary class]] ? value[key] : nil;
     if(![value isKindOfClass:[NSString class]]) {
-        FMLog("GQL query failed (%lu bytes): %{public}@", (unsigned long)data.length, error.localizedDescription);
+        FMLog("GQL query failed (%lu bytes): %@", (unsigned long)data.length, error.localizedDescription);
         return nil;
     }
     return value;
@@ -94,15 +94,15 @@
     NSTimeInterval duration = -start.timeIntervalSinceNow;
 
     if(!data) {
-        FMLog("Request failed after %.1fs: %{public}@ (%{public}@)", duration, url, error.localizedDescription);
+        FMLog("Request failed after %.1fs: %@ (%@)", duration, url, error.localizedDescription);
         return nil;
     }
 
     NSDictionary *result = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
     if(!result)
-        FMLog("Invalid JSON from %{public}@ (%lu bytes): %{public}@", url, (unsigned long)data.length, error.localizedDescription);
+        FMLog("Invalid JSON from %@ (%lu bytes): %@", url, (unsigned long)data.length, error.localizedDescription);
     else
-        FMLog("Fetched %{public}@ in %.1fs (%lu bytes)", url, duration, (unsigned long)data.length);
+        FMLog("Fetched %@ in %.1fs (%lu bytes)", url, duration, (unsigned long)data.length);
     return result;
 }
 

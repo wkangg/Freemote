@@ -78,13 +78,13 @@ static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *integrityTo
         NSString *message = [errors isKindOfClass:[NSArray class]] ? valueAt(errors.firstObject, @[@"message"]) : nil;
         message = [message isKindOfClass:[NSString class]] ? message : nil;
         if(hash && [message containsString:@"PersistedQuery"]) {
-            FMLog("Twitch doesn't know the %{public}@ hash (%{public}@), sending it as text", operationName, message);
+            FMLog("Twitch doesn't know the %@ hash (%@), sending it as text", operationName, message);
             sendGQL(headers, integrityToken, operationName, nil, query, variables, completion);
             return;
         }
         NSDictionary *data = valueAt(json, @[@"data"]);
         if(![data isKindOfClass:[NSDictionary class]] || message) {
-            FMLog("%{public}@ failed (HTTP %ld): %{public}@", operationName, (long)((NSHTTPURLResponse *)response).statusCode, message ?: error.localizedDescription);
+            FMLog("%@ failed (HTTP %ld): %@", operationName, (long)((NSHTTPURLResponse *)response).statusCode, message ?: error.localizedDescription);
             data = nil;
         }
         dispatch_async(pointsQueue(), ^{
@@ -102,13 +102,13 @@ static void receiveIntegrityToken(TwitchRNIntegrity *module, BOOL refresh, void 
     void (^resolve)(id) = ^(id result) {
         NSString *token = [result isKindOfClass:[NSDictionary class]] ? result[@"token"] : result;
         if(![token isKindOfClass:[NSString class]] || !token.length) {
-            FMLog("No integrity token from %{public}s (%{public}@)", refresh ? "refreshIntegrityToken" : "getIntegrityToken", result ? NSStringFromClass([result class]) : @"nil");
+            FMLog("No integrity token from %s (%@)", refresh ? "refreshIntegrityToken" : "getIntegrityToken", result ? NSStringFromClass([result class]) : @"nil");
             token = nil;
         }
         completion(token);
     };
     void (^reject)(NSString *, NSString *, NSError *) = ^(NSString *code, NSString *message, NSError *error) {
-        FMLog("Couldn't get an integrity token: %{public}@ %{public}@", code, message ?: error.localizedDescription);
+        FMLog("Couldn't get an integrity token: %@ %@", code, message ?: error.localizedDescription);
         completion(nil);
     };
     if(refresh)
@@ -173,9 +173,9 @@ static void sendClaim(NSString *channelID, NSString *claimID, NSString *token, B
             return;
         }
         if(errorCode && errorCode != [NSNull null])
-            FMLog("Couldn't claim the channel points bonus in channel %{public}@: %{public}@", channelID, errorCode);
+            FMLog("Couldn't claim the channel points bonus in channel %@: %@", channelID, errorCode);
         else
-            FMLog("Claimed %{public}@ channel points in channel %{public}@ (%{public}@ now)", valueAt(result, @[@"claim", @"pointsEarnedTotal"]), channelID, result[@"currentPoints"]);
+            FMLog("Claimed %@ channel points in channel %@ (%@ now)", valueAt(result, @[@"claim", @"pointsEarnedTotal"]), channelID, result[@"currentPoints"]);
     });
 }
 
@@ -184,13 +184,13 @@ static void claim(NSString *channelID, NSString *claimID, BOOL retry) {
     if(!claimingEnabled() || [claimIDs containsObject:claimID])
         return;
     if(!claimHeaders()) {
-        FMLog("Channel points bonus in channel %{public}@, but no signed-in request to claim it with yet", channelID);
+        FMLog("Channel points bonus in channel %@, but no signed-in request to claim it with yet", channelID);
         return;
     }
     if(claimIDs.count > 100)
         [claimIDs removeAllObjects];
     [claimIDs addObject:claimID];
-    FMLog("Claiming the channel points bonus in channel %{public}@", channelID);
+    FMLog("Claiming the channel points bonus in channel %@", channelID);
     integrityToken(NO, ^(NSString *token) {
         sendClaim(channelID, claimID, token, NO, retry);
     });
@@ -239,7 +239,7 @@ void FMChannelPointsNoteRequest(NSURLRequest *request, NSURLSession *session, BO
 
     dispatch_async(pointsQueue(), ^{
         if(!claimHeaders())
-            FMLog("Got %{public}s headers to claim channel points with", native ? "native" : "React Native");
+            FMLog("Got %s headers to claim channel points with", native ? "native" : "React Native");
         if(native)
             nativeHeaders = headers;
         else
@@ -271,7 +271,7 @@ static void findClaims(id json, NSUInteger depth, void (^found)(NSString *channe
             if(isNumericID(claim[@"channel_id"]) && [claim[@"id"] isKindOfClass:[NSString class]])
                 found(claim[@"channel_id"], claim[@"id"]);
             else
-                FMLog("claim-available without a channel or claim ID: %{public}@", [claim.allKeys componentsJoinedByString:@", "]);
+                FMLog("claim-available without a channel or claim ID: %@", [claim.allKeys componentsJoinedByString:@", "]);
             return;
         }
         for(id value in [json allValues])

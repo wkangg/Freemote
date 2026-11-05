@@ -50,7 +50,8 @@ SIDELOADED=1 IPA=/path/to/decrypted/Twitch.ipa make package
 
 ## Logs
 
-Freemote logs to the system log with a `[Freemote]` prefix. From a computer with the phone plugged in:
+Turn on **Debug Log** in Freemote's settings to record a log you can view and share from **View Log**. Freemote also
+logs to the system log with a `[Freemote]` prefix, which you can follow from a computer with the phone plugged in:
 
 ```sh
 uvx --python 3.13 pymobiledevice3 syslog live -m "[Freemote]"

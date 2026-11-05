@@ -88,7 +88,7 @@
     if(needsGlobals)
         FMLog("Global emotes: BTTV %lu, FFZ %lu, 7TV %lu", (unsigned long)globalLists[0].count, (unsigned long)globalLists[1].count, (unsigned long)globalLists[2].count);
     // 0 for a provider usually means the channel has no account there (or the request failed, logged above)
-    FMLog("Channel %{public}@ emotes: BTTV %lu, FFZ %lu, 7TV %lu", channelID, (unsigned long)channelLists[0].count, (unsigned long)channelLists[1].count, (unsigned long)channelLists[2].count);
+    FMLog("Channel %@ emotes: BTTV %lu, FFZ %lu, 7TV %lu", channelID, (unsigned long)channelLists[0].count, (unsigned long)channelLists[1].count, (unsigned long)channelLists[2].count);
     self.loadedChannelIDs = [self.loadedChannelIDs setByAddingObject:channelID];
 
     // Sizes land on the same emote objects, so messages after this show FFZ emotes at their own size
