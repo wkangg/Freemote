@@ -655,10 +655,67 @@ static BOOL isEmoteSetsRequest(NSURLRequest *request) {
     return channelID != nil;
 }
 
+// Whether Twitch's windows are dark. Twitch's theme setting overrides their interface style, so this follows it.
+static BOOL isDarkInterface(void) {
+    __block BOOL dark = YES;
+    dispatch_block_t read = ^{
+        for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if([scene isKindOfClass:[UIWindowScene class]] && ((UIWindowScene *)scene).windows.count) {
+                dark = ((UIWindowScene *)scene).windows.firstObject.traitCollection.userInterfaceStyle != UIUserInterfaceStyleLight;
+                return;
+            }
+        }
+    };
+    if(NSThread.isMainThread)
+        read();
+    else
+        dispatch_sync(dispatch_get_main_queue(), read);
+    return dark;
+}
+
+// 7TV's logo, as a data URL. Their logo is black, or white in dark mode (7tv.app/favicon.svg), so it's drawn here in
+// the color for Twitch's current theme: any image URL would be one color in both.
+static NSString *sevenTVLogoURL(void) {
+    static NSString *urls[2]; // @synchronized, [light, dark]
+    BOOL dark = isDarkInterface();
+    @synchronized([NSString class]) {
+        if(urls[dark])
+            return urls[dark];
+    }
+
+    // The logo's three shapes, on its 128 x 128 canvas
+    static const CGPoint shapes[][16] = {
+        {{90.986, 45.953}, {95.9196, 37.3498}, {98.584, 32.801}, {93.65, 24.1978}, {93.65, 24}, {67.3036, 24}, {77.1712, 41.2064}, {79.9344, 45.953}},
+        {{36.6158, 103.703}, {66.2184, 52.0842}, {69.8692, 45.7554}, {60.0016, 28.549}, {57.2388, 24.099}, {15.598, 24.099}, {10.6642, 32.7022}, {8, 37.251},
+         {12.9338, 45.8542}, {12.9338, 46.052}, {44.5098, 46.052}, {19.841, 89.068}, {16.3874, 95.1992}, {21.3212, 103.802}, {21.3212, 104}, {36.6158, 104}},
+        {{77.862, 103.703}, {92.9592, 103.703}, {112.694, 69.29}, {116.148, 63.357}, {111.214, 54.7538}, {111.214, 54.556}, {96.0184, 54.556}, {86.1508, 71.7624},
+         {85.46, 73.048}, {75.5924, 55.8415}, {74.902, 54.556}, {65.0344, 71.7624}, {62.2716, 76.5088}, {77.0728, 102.318}},
+    };
+    static const size_t shapeSizes[] = {8, 16, 14};
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    UIImage *image = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(128, 128) format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [(dark ? UIColor.whiteColor : UIColor.blackColor) setFill];
+        for(size_t i = 0; i < sizeof(shapeSizes) / sizeof(*shapeSizes); i++) {
+            UIBezierPath *path = [UIBezierPath bezierPath];
+            [path moveToPoint:shapes[i][0]];
+            for(size_t j = 1; j < shapeSizes[i]; j++)
+                [path addLineToPoint:shapes[i][j]];
+            [path closePath];
+            [path fill];
+        }
+    }];
+    NSString *url = [@"data:image/png;base64," stringByAppendingString:[UIImagePNGRepresentation(image) base64EncodedStringWithOptions:0]];
+    @synchronized([NSString class]) {
+        urls[dark] = url;
+    }
+    return url;
+}
+
 // One set per provider, in this order: the channel's emotes first, then globals, each by name
 static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **summary) {
     NSArray<NSDictionary *> *providers = @[
-        @{@"login": @"7tv", @"displayName": @"7TV", @"profileImageURL": @"https://avatars.githubusercontent.com/u/79559531?s=70"},
+        @{@"login": @"7tv", @"displayName": @"7TV", @"profileImageURL": sevenTVLogoURL()},
         @{@"login": @"betterttv", @"displayName": @"BetterTTV", @"profileImageURL": @"https://betterttv.com/favicon.png"},
         @{@"login": @"frankerfacez", @"displayName": @"FrankerFaceZ", @"profileImageURL": @"https://www.frankerfacez.com/static/images/favicon-96.png"},
     ];
