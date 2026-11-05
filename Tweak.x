@@ -1017,6 +1017,41 @@ static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, FMEmo
     return emotes.count ? [emotes componentsJoinedByString:@"/"] : nil;
 }
 
+// "10 minutes", in the largest unit it's a whole number of
+static NSString *durationText(long long seconds) {
+    long long sizes[] = {86400, 3600, 60, 1};
+    NSString *units[] = {@"day", @"hour", @"minute", @"second"};
+    for(int i = 0; i < 4; i++) {
+        if(seconds % sizes[i] == 0)
+            return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
+    }
+    return nil;
+}
+
+// Twitch shows viewers nothing when someone is timed out or banned, so a CLEARCHAT with a user gets a NOTICE after it,
+// which the React Native chat draws as a system line ({type: 'notice'}, any msg-id it doesn't know).
+// "@ban-duration=600;room-id=…;target-user-id=…;tmi-sent-ts=… :tmi.twitch.tv CLEARCHAT #channel :login"
+static NSString *timeoutNoticeLine(NSArray<NSString *> *tags, NSString *rest, NSArray<NSString *> *words, NSString *channelID) {
+    NSRange textStart = [rest rangeOfString:@" :"];
+    if(words.count < 3 || textStart.location == NSNotFound || ![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
+        return nil;
+    NSString *login = [[rest substringFromIndex:NSMaxRange(textStart)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if(!login.length)
+        return nil;
+    NSString *duration, *sentTs = @"";
+    for(NSString *tag in tags) {
+        if([tag hasPrefix:@"ban-duration="])
+            duration = [tag substringFromIndex:13];
+        else if([tag hasPrefix:@"tmi-sent-ts="])
+            sentTs = [tag substringFromIndex:12];
+    }
+    NSString *text = duration.longLongValue > 0
+        ? [NSString stringWithFormat:@"%@ has been timed out for %@.", login, durationText(duration.longLongValue)]
+        : [NSString stringWithFormat:@"%@ has been banned.", login];
+    FMLogFirst(3, "React Native chat: %{public}@", text);
+    return [NSString stringWithFormat:@"@msg-id=freemote_moderation;room-id=%@;tmi-sent-ts=%@ :tmi.twitch.tv NOTICE %@ :%@", channelID, sentTs, words[2], text];
+}
+
 // "@<tags> :<prefix> <command> <params> :<text>". Starts loading the channel's emotes from any line with a room-id
 // (ROOMSTATE comes right after joining), and adds them to PRIVMSG and USERNOTICE lines.
 static NSString *ircLineWithEmotes(NSString *line) {
@@ -1047,6 +1082,10 @@ static NSString *ircLineWithEmotes(NSString *line) {
     }
     if([command isEqualToString:@"ROOMSTATE"])
         FMChannelPointsCheckChannel(channelID);
+    if([command isEqualToString:@"CLEARCHAT"]) {
+        NSString *notice = timeoutNoticeLine(tags, rest, words, channelID);
+        return notice ? [NSString stringWithFormat:@"%@\r\n%@", line, notice] : line;
+    }
     if(![command isEqualToString:@"PRIVMSG"] && ![command isEqualToString:@"USERNOTICE"])
         return line;
 
