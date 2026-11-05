@@ -42,8 +42,9 @@
                 lists[index] = emotes;
                 [self publishEmotes:emotes channelID:channelID globals:needsGlobals ? nil : knownGlobals globalLists:globalLists channelLists:channelLists];
             }
+            // Even with none of its own: the first publish is what gives a channel its table (globals included)
             void (^channelEmotesChanged)(NSString *) = self.channelEmotesChanged;
-            if(emotes.count && channelEmotesChanged)
+            if(channelEmotesChanged)
                 channelEmotesChanged(channelID);
         });
     };
