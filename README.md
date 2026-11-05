@@ -31,12 +31,18 @@ gh workflow run build.yml -R wkangg/Freemote --ref master -f ipa_url=<decrypted 
 
 ## Build
 
-Needs [Theos](https://theos.dev).
+- The debs need [Theos](https://theos.dev).
+- The IPA needs Theos and [theos-jailed](https://github.com/level3tjg/theos-jailed), which injects Freemote into a decrypted Twitch IPA.
 
 ```sh
-make package                                # rootful deb
-THEOS_PACKAGE_SCHEME=rootless make package  # rootless deb
-SIDELOADED=1 IPA=/path/to/Twitch.ipa make package  # IPA (needs theos-jailed)
+# deb for rootful jailbreaks
+make package
+
+# deb for rootless jailbreaks
+THEOS_PACKAGE_SCHEME=rootless make package
+
+# Twitch IPA with Freemote injected, for sideloading (needs theos-jailed)
+SIDELOADED=1 IPA=/path/to/decrypted/Twitch.ipa make package
 ```
 
 ## Logs
