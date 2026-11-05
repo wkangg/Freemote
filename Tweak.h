@@ -73,3 +73,15 @@ typedef void (^RCTLogFunction)(NSInteger level, NSInteger source, NSString *file
 @interface EmoteCardTitleView : UIView
 @property (nonatomic, strong) UITextView *freemote_emoteCardLink; // %property
 @end
+
+// Twitch's account menu (Twitch.AccountMenuViewController), where our settings row goes
+@interface AccountMenuViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, assign) NSInteger freemote_settingsRow; // %property
+- (BOOL)freemote_isSettingsRow:(NSIndexPath *)indexPath tableView:(UITableView *)tableView; // %new
+@end
+
+// The account menu's rows (Twitch.ConfigurableAccessoryTableViewCell)
+@interface ConfigurableAccessoryTableViewCell : UITableViewCell
+@property (nonatomic, assign) BOOL useDefaultBackgroundColor;
+- (void)configureWithTitle:(NSString *)title;
+@end

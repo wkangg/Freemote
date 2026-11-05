@@ -1,5 +1,6 @@
 #import "FMEmoteManager.h"
 #import "FMLog.h"
+#import "FMSettings.h"
 
 @interface FMEmoteManager ()
 // Channels whose requests have all finished. Their emotes are published as each request finishes, before this.
@@ -35,6 +36,9 @@
 
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    // A provider turned off in settings is never fetched, so its lists stay empty
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL bttv = [defaults boolForKey:FMBTTVEnabledKey], ffz = [defaults boolForKey:FMFFZEnabledKey], sevenTV = [defaults boolForKey:FMSevenTVEnabledKey];
     void (^fetch)(NSMutableArray *, NSUInteger, NSArray *(^)(void)) = ^(NSMutableArray *lists, NSUInteger index, NSArray *(^fetchEmotes)(void)) {
         dispatch_group_async(group, queue, ^{
             NSArray<FMEmote *> *emotes = fetchEmotes();
@@ -48,32 +52,37 @@
                 channelEmotesChanged(channelID);
         });
     };
-    if(needsGlobals) {
+    if(needsGlobals && bttv)
         fetch(globalLists, 0, ^NSArray *{ return [self emotesFromInfo:[httpClient bttvGlobalEmotes] type:BTTVGlobal]; });
+    if(needsGlobals && ffz)
         fetch(globalLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzGlobalEmotes] type:FFZGlobal]; });
+    if(needsGlobals && sevenTV)
         fetch(globalLists, 2, ^NSArray *{
             NSDictionary *info = [httpClient sevenTVGlobalEmotes];
             return [self emotesFromInfo:[info isKindOfClass:[NSDictionary class]] ? info[@"emotes"] : nil type:SevenTVGlobal];
         });
-    }
-    fetch(channelLists, 0, ^NSArray *{
-        NSDictionary *info = [httpClient bttvEmoteInformationForChannelID:channelID];
-        if(![info isKindOfClass:[NSDictionary class]])
-            return @[];
-        return [[self emotesFromInfo:info[@"channelEmotes"] type:BTTV] arrayByAddingObjectsFromArray:[self emotesFromInfo:info[@"sharedEmotes"] type:BTTV]];
-    });
-    fetch(channelLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzEmoteInformationForChannelID:channelID] type:FFZ]; });
-    fetch(channelLists, 2, ^NSArray *{
-        NSDictionary *info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
-        id emoteSet = [info isKindOfClass:[NSDictionary class]] ? info[@"emote_set"] : nil;
-        return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
-    });
+    if(bttv)
+        fetch(channelLists, 0, ^NSArray *{
+            NSDictionary *info = [httpClient bttvEmoteInformationForChannelID:channelID];
+            if(![info isKindOfClass:[NSDictionary class]])
+                return @[];
+            return [[self emotesFromInfo:info[@"channelEmotes"] type:BTTV] arrayByAddingObjectsFromArray:[self emotesFromInfo:info[@"sharedEmotes"] type:BTTV]];
+        });
+    if(ffz)
+        fetch(channelLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzEmoteInformationForChannelID:channelID] type:FFZ]; });
+    if(sevenTV)
+        fetch(channelLists, 2, ^NSArray *{
+            NSDictionary *info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
+            id emoteSet = [info isKindOfClass:[NSDictionary class]] ? info[@"emote_set"] : nil;
+            return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
+        });
     // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
     __block NSDictionary *ffzGlobalSets, *ffzRoom;
     dispatch_group_t sizeGroup = dispatch_group_create();
-    if(needsGlobals)
+    if(needsGlobals && ffz)
         dispatch_group_async(sizeGroup, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
-    dispatch_group_async(sizeGroup, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
+    if(ffz)
+        dispatch_group_async(sizeGroup, queue, ^{ ffzRoom = [httpClient ffzRoomForChannelID:channelID]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     if(needsGlobals)

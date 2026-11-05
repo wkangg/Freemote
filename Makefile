@@ -2,7 +2,8 @@ ifeq ($(SIDELOADED),1)
 MODULES = jailed
 endif
 
-TARGET := iphone:clang:latest:12.4
+# Twitch 31.x needs iOS 16.4
+TARGET := iphone:clang:latest:16.4
 INSTALL_TARGET_PROCESSES = Twitch
 
 ARCHS = arm64

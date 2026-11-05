@@ -3,6 +3,7 @@
 #import "FMEmoteManager.h"
 #import "FMLog.h"
 #import "FMReactNativePatch.h"
+#import "FMSettings.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
@@ -612,6 +613,94 @@ static id swiftIvar(id object, const char *name) {
     return ivar ? object_getIvar(object, ivar) : nil;
 }
 
+// A row at the end of the account menu's last section opens our settings, like TwitchAdBlock's. TwitchAdBlock hooks the
+// same methods and takes whatever the last row is, so ours goes right after the rows from the hooks under ours
+// (freemote_settingsRow), and while we pass a call down, our row count leaves our row out. That way the two rows don't
+// collide whichever tweak hooks first. Table view calls are main thread only.
+static BOOL forwardingAccountMenuCall;
+
+static UIImage *twitchIcon(NSString *name, NSString *systemName) {
+    // The icons moved from TwitchCoreUI to TwitchCoreUIAssets
+    for(NSString *bundleID in @[@"twitch.TwitchCoreUIAssets", @"twitch.TwitchCoreUI"]) {
+        UIImage *image = [UIImage imageNamed:name inBundle:[NSBundle bundleWithIdentifier:bundleID] compatibleWithTraitCollection:nil];
+        if(image)
+            return image;
+    }
+    return [UIImage systemImageNamed:systemName];
+}
+
+static UITableViewCell *settingsCell(void) {
+    Class cellClass = objc_getClass("_TtC6Twitch34ConfigurableAccessoryTableViewCell");
+    if(!cellClass) {
+        FMLogFirst(1, "No ConfigurableAccessoryTableViewCell, the settings row is a plain one");
+        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.textLabel.text = @"Freemote";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
+    ConfigurableAccessoryTableViewCell *cell = [[cellClass alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Twitch.ConfigurableAccessoryTableViewCell"];
+    [cell configureWithTitle:@"Freemote"];
+    if([cell respondsToSelector:@selector(setUseDefaultBackgroundColor:)])
+        cell.useDefaultBackgroundColor = YES;
+    UIImageView *arrowView = [[UIImageView alloc] initWithImage:twitchIcon(@"arrow-forward-Icon", @"chevron.right")];
+    arrowView.tintColor = UIColor.grayColor;
+    cell.accessoryView = arrowView;
+    UIImageView *iconView = swiftIvar(cell, "customImageView");
+    if([iconView isKindOfClass:[UIImageView class]]) {
+        iconView.image = twitchIcon(@"Emotes-Icon", @"face.smiling");
+        iconView.hidden = NO;
+    }
+    return cell;
+}
+
+%hook AccountMenuViewController
+
+%property (nonatomic, assign) NSInteger freemote_settingsRow;
+
+%new(B@:@@)
+- (BOOL)freemote_isSettingsRow:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
+    return indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 && indexPath.row == self.freemote_settingsRow;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSInteger rows = %orig;
+    if(forwardingAccountMenuCall || section != [self numberOfSectionsInTableView:tableView] - 1)
+        return rows;
+    self.freemote_settingsRow = rows;
+    return rows + 1;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if([self freemote_isSettingsRow:indexPath tableView:tableView])
+        return settingsCell();
+    forwardingAccountMenuCall = YES;
+    UITableViewCell *cell = %orig;
+    forwardingAccountMenuCall = NO;
+    return cell;
+}
+
+// Twitch looks the row up in its own row model here, which doesn't have ours
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if([self freemote_isSettingsRow:indexPath tableView:tableView])
+        return;
+    forwardingAccountMenuCall = YES;
+    %orig;
+    forwardingAccountMenuCall = NO;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if([self freemote_isSettingsRow:indexPath tableView:tableView]) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        [self.navigationController pushViewController:[[FMSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];
+        return;
+    }
+    forwardingAccountMenuCall = YES;
+    %orig;
+    forwardingAccountMenuCall = NO;
+}
+
+%end
+
 // Twitch's link purple
 static UIColor *linkColor(void) {
     return [UIColor colorWithRed:0xA9 / 255.0 green:0x70 / 255.0 blue:0xFF / 255.0 alpha:1];
@@ -1059,7 +1148,8 @@ static void watchForReactNativeReady(void) {
     NSError *error;
     if(![self respondsToSelector:@selector(registerSegmentWithId:path:)])
         FMLog("RCTInstance changed, React Native emotes stay square");
-    else if(![FMReactNativePatchSource writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
+    else if(![[NSString stringWithFormat:@"globalThis.freemoteKeepDeletedMessages = %@;\n%@", [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey] ? @"true" : @"false", FMReactNativePatchSource]
+                writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
         FMLog("Couldn't write the React Native patch, emotes stay square: %{public}@", error.localizedDescription);
     else {
         // A new runtime: wait for its patch to say it's ready
@@ -1541,6 +1631,7 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
 
 %ctor {
     FMLog("Freemote %{public}s loaded in Twitch %{public}@", FREEMOTE_VERSION, NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]);
+    FMRegisterDefaults();
     emoteManager = [[FMEmoteManager alloc] init];
     hookEmoteSizes();
     emoteQueue = dispatch_queue_create("com.gilesgc.freemote.emotes", DISPATCH_QUEUE_SERIAL);
@@ -1555,5 +1646,5 @@ static CGFloat emoteAdvance(NSDictionary<NSNumber *, TWMessageEmoteToken *> *tok
     channelIDsByVideoID = [[NSCache alloc] init];
     channelIDsByNonce = [[NSCache alloc] init];
     channelIDsByNonce.countLimit = 100;
-    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"));
+    %init(ChannelSettingsRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager25ChannelSettingsRepository"), BitsConfigRepository = objc_getClass("_TtCC6Twitch17TwitchChatManager20BitsConfigRepository"), ApolloURLSessionClient = objc_getClass("_TtC6Apollo16URLSessionClient"), TKURLSessionClient = objc_getClass("_TtC9TwitchKit18TKURLSessionClient"), EmoteCardTitleView = objc_getClass("_TtC6Twitch18EmoteCardTitleView"), AccountMenuViewController = objc_getClass("_TtC6Twitch25AccountMenuViewController"));
 }
