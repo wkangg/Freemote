@@ -387,6 +387,9 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
         BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
         NSUInteger emoteCount = 0, withoutFragments = 0;
         for(NSDictionary *message in messages) {
+            // So native chat knows the channel of history messages too (a timeout only dims messages from its channel)
+            if([message isKindOfClass:[NSDictionary class]] && [message[@"id"] isKindOfClass:[NSString class]])
+                [channelIDsByMessageID setObject:json[@"id"] forKey:message[@"id"]];
             NSMutableDictionary *content = [message isKindOfClass:[NSDictionary class]] ? message[@"content"] : nil;
             BOOL hasFragments = NO;
             if([content isKindOfClass:[NSMutableDictionary class]]) {
