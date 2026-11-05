@@ -1325,9 +1325,14 @@ static void dimDeletedMessagesInView(UIView *view) {
         dimDeletedMessagesInView(subview);
 }
 
-// Rows already on screen
+// Rows already on screen. A ban wave can bring hundreds of events at once, so only one walk is queued at a time.
+static atomic_bool deletedMessagesRefreshQueued;
+
 static void refreshDeletedMessages(void) {
+    if(atomic_exchange(&deletedMessagesRefreshQueued, true))
+        return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&deletedMessagesRefreshQueued, false);
         for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if([scene isKindOfClass:[UIWindowScene class]])
                 for(UIWindow *window in ((UIWindowScene *)scene).windows)
