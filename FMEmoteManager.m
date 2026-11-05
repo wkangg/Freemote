@@ -24,7 +24,7 @@
 
 - (void)loadEmotesForChannel:(NSString *)channelID {
     // Fetch everything in parallel and publish each provider's emotes as soon as its request finishes, so a slow
-    // provider doesn't hold up the others. Returns once they're all in, which VOD chat waits on.
+    // provider doesn't hold up the others. Returns once they're all in, which native chat history and VOD chat wait on.
     FMHTTPClient *httpClient = _httpClient;
     NSDictionary *knownGlobals = self.globalNameRegistry;
     BOOL needsGlobals = knownGlobals.count == 0;
