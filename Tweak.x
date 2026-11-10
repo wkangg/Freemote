@@ -1525,11 +1525,16 @@ static __weak RCTInstance *reactInstance;
 static atomic_bool reactNativeReadyForEmotes;
 // Whether the patch was loaded with freemoteKeepDeletedMessages on: the setting applies after restarting Twitch
 static atomic_bool reactNativeKeepsDeletedMessages;
+// Whether the patch said it can't change chat rows, which is what dims deleted messages
+static atomic_bool reactNativeChatRowsUnpatched;
 
-// Only when the patch can be told which ones they are: it's what dims them
+// Only when the patch can be told which ones they are, and hasn't said it can't dim them: they'd look like any other
+// message. It patches chat rows when their module is first used, which can be after the first history comes in, so
+// this doesn't wait for it to say it has. (If Twitch changes the rows so much the patch never finds them, it says
+// nothing, and deleted history messages aren't dimmed.)
 static BOOL canKeepDeletedHistoryMessages(void) {
-    return atomic_load(&reactNativeKeepsDeletedMessages) && atomic_load(&reactNativeReadyForEmotes) && reactInstance != nil
-        && [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey];
+    return atomic_load(&reactNativeKeepsDeletedMessages) && atomic_load(&reactNativeReadyForEmotes) && !atomic_load(&reactNativeChatRowsUnpatched)
+        && reactInstance != nil && [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey];
 }
 
 static void sendDeletedHistoryMessages(NSSet<NSString *> *messageIDs) {
@@ -1581,6 +1586,11 @@ static void watchForReactNativeReady(void) {
                 return;
             }
             FMLog("%@", [message substringFromIndex:NSMaxRange(prefix)]);
+            // The patch's lines for when it can't wrap chat rows, or has no view to dim them with
+            for(NSString *failure in @[@"before ChatMessageRow", @"Couldn't patch React Native chat:", @"No React Native View"]) {
+                if([message containsString:failure])
+                    atomic_store(&reactNativeChatRowsUnpatched, true);
+            }
             if(![message hasSuffix:FMReactNativeReadyMessage])
                 return;
             atomic_store(&reactNativeReadyForEmotes, true);
@@ -1609,6 +1619,7 @@ static void watchForReactNativeReady(void) {
         // A new runtime: wait for its patch to say it's ready
         atomic_store(&reactNativeReadyForEmotes, false);
         atomic_store(&reactNativeKeepsDeletedMessages, keepDeletedMessages);
+        atomic_store(&reactNativeChatRowsUnpatched, false);
         if([self respondsToSelector:@selector(callFunctionOnJSModule:method:args:)]) {
             reactInstance = self;
             watchForReactNativeReady();

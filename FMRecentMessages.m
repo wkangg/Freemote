@@ -217,18 +217,24 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
                 [deletedIDs addObject:messageID];
                 continue;
             }
+            // The chat makes the message's text from its fragments
             NSDictionary *content = message[@"content"];
-            NSString *text = [content isKindOfClass:[NSDictionary class]] ? content[@"text"] : nil;
-            if([message isKindOfClass:[NSMutableDictionary class]] && [text isKindOfClass:[NSString class]] && text.length) {
+            NSArray *fragments = [content isKindOfClass:[NSDictionary class]] ? content[@"fragments"] : nil;
+            if([message isKindOfClass:[NSMutableDictionary class]] && [fragments isKindOfClass:[NSArray class]] && fragments.count) {
                 message[@"deletedAt"] = [NSNull null];
                 [deletedIDs addObject:messageID];
+                deleted = NO;
             }
         } else if(!deleted && [recentDeletedIDs containsObject:messageID]) {
-            // Deleted since Twitch answered, or Twitch doesn't say so
+            // Deleted since Twitch answered, or Twitch doesn't say so (a timeout)
             [deletedIDs addObject:messageID];
+            deleted = !deletedIDs;
         }
+        // Seen, so the service's copy isn't added either
         [seenIDs addObject:messageID];
-        [dated addObject:@[date, message]];
+        // The chat drops a deleted message, so it doesn't take up one of the FMChatHistoryLimit
+        if(!deleted)
+            [dated addObject:@[date, message]];
     }
     for(NSMutableDictionary *message in recentMessages.messages) {
         BOOL deleted = [recentDeletedIDs containsObject:message[@"id"]];
