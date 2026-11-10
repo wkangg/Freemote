@@ -852,7 +852,9 @@ static NSDictionary<NSNumber *, id> *swiftIntKeyedDictionary(const uint8_t *valu
     if(reference < FMLeastValidPointer || reference >> 62)
         return nil;
     const uint8_t *storage = (const uint8_t *)(uintptr_t)reference;
-    if(!isSwiftDictionaryStorage(object_getClass((__bridge id)(void *)storage)))
+    // Held while it's read, so a change to the property meanwhile copies it rather than freeing it
+    __attribute__((objc_precise_lifetime)) id owner = (__bridge id)(void *)storage;
+    if(!isSwiftDictionaryStorage(object_getClass(owner)))
         return nil;
     NSInteger count = *(const NSInteger *)(storage + 16);
     int8_t scale = *(const int8_t *)(storage + 32);
@@ -1854,6 +1856,23 @@ static id eventKeepingMessages(id event, NSString *channelName) {
     return event;
 }
 
+// Whether TWChatMessage's fields are still spaced as their 31.9 and 32.0 types lay them out (Identity? 56 bytes, Date? 9
+// padded to 16, MessageID? 17 padded to 24), so a later version that changed one isn't read as if it hadn't
+static BOOL hasKnownChatMessageLayout(Class cls) {
+    static dispatch_once_t once;
+    static BOOL known;
+    dispatch_once(&once, ^{
+        Ivar identity = class_getInstanceVariable(cls, "senderIdentity"), badges = class_getInstanceVariable(cls, "badges");
+        Ivar date = class_getInstanceVariable(cls, "date"), messageID = class_getInstanceVariable(cls, "messageID");
+        Ivar color = class_getInstanceVariable(cls, "color");
+        known = identity && badges && date && messageID && color && ivar_getOffset(badges) - ivar_getOffset(identity) == 56
+            && ivar_getOffset(messageID) - ivar_getOffset(date) == 16 && ivar_getOffset(color) - ivar_getOffset(messageID) == 24;
+        if(!known)
+            FMLog("TWChatMessage changed, deleted native chat messages aren't dimmed");
+    });
+    return known;
+}
+
 // A native chat message's ID, its sender's user ID and when it was sent, each nil if it isn't known
 static void chatMessageDetails(TWChatMessage *message, NSString **messageID, NSString **senderID, NSDate **date) {
     *messageID = *senderID = nil;
@@ -1870,6 +1889,8 @@ static void chatMessageDetails(TWChatMessage *message, NSString **messageID, NSS
     }
 
     // 32.0 dropped the ObjC getters, so the Swift values are read where they're stored (same types in 31.9 and 32.0)
+    if(!hasKnownChatMessageLayout(object_getClass(message)))
+        return;
     // messageID: MessageID? = live(String) or whisper(String), 17 bytes: the String, then the case (0, 1, else nil)
     const uint8_t *value = ivarAddress(message, "messageID");
     if(value && value[16] <= 1)
@@ -2330,15 +2351,19 @@ static BOOL swiftClassTables(Class cls, const uint32_t **vtable, const uint32_t 
 // 32.0 dropped the ObjC method, so there's no thunk to follow. sizeOfImageAttachment(at:) is entry 23 of MessageString's
 // 39-entry vtable from word 21 (0x160 in the metadata), an instance method that ChatMessageString overrides, in both 31.9
 // and 32.0. All of that is checked, so a vtable that changed leaves the sizes alone rather than replacing another method.
+// So is fontAtCharacterIndex:, whose thunk 32.0 kept, still calling entry 28: methods moved around entry 23 would move it.
 #define FMMessageStringVTableOffset 21
 #define FMMessageStringVTableSize 39
 #define FMImageSizeVTableIndex 23
+#define FMFontVTableIndex 28
 
 static BOOL imageSizeVTableEntries(Class messageString, Class chatMessageString, void ***entry, void ***chatEntry) {
     const uint32_t *vtable, *overrides, *chatVTable, *chatOverrides;
     if(!messageString || !chatMessageString || class_getSuperclass(chatMessageString) != messageString
        || !swiftClassTables(messageString, &vtable, &overrides) || !swiftClassTables(chatMessageString, &chatVTable, &chatOverrides)
-       || !vtable || vtable[0] != FMMessageStringVTableOffset || vtable[1] != FMMessageStringVTableSize || !chatOverrides)
+       || !vtable || vtable[0] != FMMessageStringVTableOffset || vtable[1] != FMMessageStringVTableSize || !chatOverrides
+       || chatOverrides[0] > 64 || swiftMethodEntry(messageString, @selector(fontAtCharacterIndex:))
+          != (void **)((uint8_t *)(__bridge void *)messageString + (FMMessageStringVTableOffset + FMFontVTableIndex) * sizeof(void *)))
         return NO;
     size_t slot = (FMMessageStringVTableOffset + FMImageSizeVTableIndex) * sizeof(void *);
     // Class size and address point: the slot has to be in both classes' metadata
