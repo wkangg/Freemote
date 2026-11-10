@@ -48,7 +48,9 @@
 @end
 
 
-// Swift classes in Twitch, used through their ObjC methods (TwitchKit's TWMessageEmoteToken, Twitch's MessageString)
+// Swift classes in Twitch, used through their ObjC methods (TwitchKit's TWMessageEmoteToken, Twitch's MessageString).
+// From 32.0 only TWMessageEmoteToken still has them: the others are read from their ivars (see chatMessageDetails and
+// emoteTokens in Tweak.x).
 @interface TWMessageEmoteToken : NSObject
 @property (readonly) NSString *emoteId;
 @end

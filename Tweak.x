@@ -307,7 +307,8 @@ static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID
 
 #pragma mark - Chat history
 
-// Chat history (ChatHistory, TheaterPortalPreload) and VOD chat (VideoCommentsBy*) come from GQL instead of KMPMobileChat
+// Chat history (ChatHistory, and TheaterPortalPreload up to 31.x) and VOD chat (VideoCommentsBy*) come from GQL instead of
+// KMPMobileChat
 static NSSet<NSString *> *chatHistoryOperations;
 
 // The GQL operations in a request: its body is one operation or a batch of them
@@ -801,6 +802,74 @@ static void addEmotePickerSets(id json, NSURLRequest *request) {
 static id swiftIvar(id object, const char *name) {
     Ivar ivar = class_getInstanceVariable([object class], name);
     return ivar ? object_getIvar(object, ivar) : nil;
+}
+
+// Where an ivar's value is stored in the object, or NULL: for Swift values that aren't objects
+static const uint8_t *ivarAddress(id object, const char *name) {
+    Ivar ivar = object ? class_getInstanceVariable(object_getClass(object), name) : NULL;
+    return ivar ? (const uint8_t *)(__bridge void *)object + ivar_getOffset(ivar) : NULL;
+}
+
+// Nothing is mapped below 4 GB in an arm64 app, so a Swift reference is never under this, and an Optional's nil (an extra
+// inhabitant of a reference in it) always is
+#define FMLeastValidPointer 0x100000000ULL
+
+// A Swift String's value, from its two words as the Swift ABI fixes them, or nil for a kind this doesn't read. A small one
+// keeps up to 15 UTF-8 bytes inline (bit 61 of the second word, count in bits 56-59). A large one points to its storage,
+// whose UTF-8 starts 32 bytes in (bit 60 of the first word, count in its low 48 bits), or (bit 62) to the NSString it was
+// bridged from.
+static NSString *swiftString(const uint8_t *value) {
+    uint64_t countAndFlags = *(const uint64_t *)value, object = *(const uint64_t *)(value + 8);
+    if(object & (1ULL << 61))
+        return [[NSString alloc] initWithBytes:value length:MIN((object >> 56) & 0xF, 15) encoding:NSUTF8StringEncoding];
+    uintptr_t address = (uintptr_t)(object & 0x0FFFFFFFFFFFFFFFULL);
+    if(address < FMLeastValidPointer)
+        return nil;
+    if(object & (1ULL << 62)) {
+        id string = (__bridge id)(void *)address;
+        return [string isKindOfClass:[NSString class]] ? [string copy] : nil;
+    }
+    NSUInteger count = (NSUInteger)(countAndFlags & 0xFFFFFFFFFFFFULL);
+    if(!(countAndFlags & (1ULL << 60)) || count > 0x100000)
+        return nil;
+    return [[NSString alloc] initWithBytes:(const void *)(address + 32) length:count encoding:NSUTF8StringEncoding];
+}
+
+static BOOL isSwiftDictionaryStorage(Class cls) {
+    for(; cls; cls = class_getSuperclass(cls)) {
+        if(strstr(class_getName(cls), "RawDictionaryStorage"))
+            return YES;
+    }
+    return NO;
+}
+
+// A Swift [Int: SomeClass] as an NSDictionary, or nil for a kind this doesn't read. It's one reference to storage laid out
+// as the Swift ABI fixes it: the count at 16, log2 of the bucket count at 32, the keys and values at 48 and 56, and a
+// bitmap of the buckets in use from 64.
+static NSDictionary<NSNumber *, id> *swiftIntKeyedDictionary(const uint8_t *value) {
+    uint64_t reference = *(const uint64_t *)value;
+    // Bits 62 and 63 are an NSDictionary it was bridged from, which one built in Swift isn't
+    if(reference < FMLeastValidPointer || reference >> 62)
+        return nil;
+    const uint8_t *storage = (const uint8_t *)(uintptr_t)reference;
+    if(!isSwiftDictionaryStorage(object_getClass((__bridge id)(void *)storage)))
+        return nil;
+    NSInteger count = *(const NSInteger *)(storage + 16);
+    int8_t scale = *(const int8_t *)(storage + 32);
+    if(!count)
+        return @{};
+    if(count < 0 || scale < 0 || scale > 24 || count > (1L << scale))
+        return nil;
+    const NSInteger *keys = *(const NSInteger *const *)(storage + 48);
+    void *const *values = *(void *const *const *)(storage + 56);
+    const uint64_t *bitmap = (const uint64_t *)(storage + 64);
+    NSMutableDictionary<NSNumber *, id> *dictionary = [NSMutableDictionary dictionaryWithCapacity:count];
+    for(NSUInteger bucket = 0; bucket < (1UL << scale) && dictionary.count < (NSUInteger)count; bucket++) {
+        id element = (bitmap[bucket / 64] >> (bucket % 64)) & 1 ? (__bridge id)values[bucket] : nil;
+        if(element)
+            dictionary[@(keys[bucket])] = element;
+    }
+    return dictionary.count == (NSUInteger)count ? dictionary : nil;
 }
 
 // A row at the end of the account menu's last section opens our settings, like TwitchAdBlock's. TwitchAdBlock hooks the
@@ -1785,20 +1854,53 @@ static id eventKeepingMessages(id event, NSString *channelName) {
     return event;
 }
 
+// A native chat message's ID, its sender's user ID and when it was sent, each nil if it isn't known
+static void chatMessageDetails(TWChatMessage *message, NSString **messageID, NSString **senderID, NSDate **date) {
+    *messageID = *senderID = nil;
+    *date = nil;
+    if(!message)
+        return;
+    if([message respondsToSelector:@selector(messageID)] && [message respondsToSelector:@selector(senderId)] && [message respondsToSelector:@selector(date)]) {
+        // 31.x
+        id sender = message.senderId;
+        *messageID = message.messageID;
+        *senderID = sender ? [NSString stringWithFormat:@"%@", sender] : nil;
+        *date = message.date;
+        return;
+    }
+
+    // 32.0 dropped the ObjC getters, so the Swift values are read where they're stored (same types in 31.9 and 32.0)
+    // messageID: MessageID? = live(String) or whisper(String), 17 bytes: the String, then the case (0, 1, else nil)
+    const uint8_t *value = ivarAddress(message, "messageID");
+    if(value && value[16] <= 1)
+        *messageID = swiftString(value);
+    else if(value)
+        FMLogFirst(3, "Native chat message without an ID (tag %d)", value[16]);
+    // senderIdentity: Identity? = {id: UInt32, name: String, rawDisplayName: String?, displayName: String}. Its nil is an
+    // extra inhabitant in name's (or displayName's) object word, which is never that low for a real String.
+    value = ivarAddress(message, "senderIdentity");
+    if(value && *(const uint64_t *)(value + 16) >= FMLeastValidPointer && *(const uint64_t *)(value + 48) >= FMLeastValidPointer
+       && *(const uint32_t *)value)
+        *senderID = [NSString stringWithFormat:@"%u", *(const uint32_t *)value];
+    // date: Date? = seconds since 2001 as a Double, then a tag byte that's 0 when there's a date
+    value = ivarAddress(message, "date");
+    if(value && !value[8] && isfinite(*(const double *)value) && *(const double *)value > 0)
+        *date = [NSDate dateWithTimeIntervalSinceReferenceDate:*(const double *)value];
+}
+
 static BOOL isDeletedMessage(TWChatMessage *message) {
-    if(![message respondsToSelector:@selector(messageID)] || ![message respondsToSelector:@selector(senderId)] || ![message respondsToSelector:@selector(date)])
-        return NO;
-    NSString *messageID = message.messageID;
+    NSString *messageID, *senderID;
+    NSDate *sent;
+    chatMessageDetails(message, &messageID, &senderID, &sent);
     if([messageID isKindOfClass:[NSString class]] && [deletedMessageIDs objectForKey:messageID])
         return YES;
-    id senderID = message.senderId;
-    if(!senderID)
+    if(![senderID isKindOfClass:[NSString class]])
         return NO;
     // Only a timeout or ban in the message's own channel, when it's known (live messages)
     NSString *channelID = [messageID isKindOfClass:[NSString class]] ? [channelIDsByMessageID objectForKey:messageID] : nil;
     NSDate *cleared;
     @synchronized(userClearDates) {
-        NSDictionary<NSString *, NSDate *> *dates = userClearDates[[NSString stringWithFormat:@"%@", senderID]];
+        NSDictionary<NSString *, NSDate *> *dates = userClearDates[senderID];
         if(channelID)
             cleared = dates[channelID] ?: dates[@""];
         else
@@ -1806,7 +1908,6 @@ static BOOL isDeletedMessage(TWChatMessage *message) {
                 cleared = !cleared || [date compare:cleared] == NSOrderedDescending ? date : cleared;
     }
     // Only what they sent before it (with a second for the server's clock), not after a timeout runs out
-    NSDate *sent = message.date;
     return cleared && [sent isKindOfClass:[NSDate class]] && [sent timeIntervalSinceDate:cleared] <= 1;
 }
 
@@ -1815,7 +1916,10 @@ static TWChatMessage *chatMessageInView(MessageStringView *view) {
         if(![layer isKindOfClass:MessageStringLayerClass])
             continue;
         TWChatMessageString *messageString = swiftIvar(layer, "messageString");
-        return [messageString respondsToSelector:@selector(chatMessage)] ? messageString.chatMessage : nil;
+        if([messageString respondsToSelector:@selector(chatMessage)])
+            return messageString.chatMessage;
+        // 32.0 dropped the getter. A plain MessageString has no chatMessage, so that's nil.
+        return swiftIvar(messageString, "chatMessage");
     }
     return nil;
 }
@@ -2111,7 +2215,14 @@ static FMEmote *emoteForToken(TWMessageEmoteToken *token) {
 }
 
 static NSDictionary<NSNumber *, TWMessageEmoteToken *> *emoteTokens(TWMessageString *messageString) {
-    NSDictionary *tokens = [messageString respondsToSelector:@selector(emoteLocationsMap)] ? messageString.emoteLocationsMap : nil;
+    NSDictionary *tokens;
+    if([messageString respondsToSelector:@selector(emoteLocationsMap)]) {
+        tokens = messageString.emoteLocationsMap;
+    } else {
+        // 32.0 dropped the getter: read the [Int: TWMessageEmoteToken] itself
+        const uint8_t *value = ivarAddress(messageString, "emoteLocationsMap");
+        tokens = value ? swiftIntKeyedDictionary(value) : nil;
+    }
     return [tokens isKindOfClass:[NSDictionary class]] ? tokens : nil;
 }
 
@@ -2175,15 +2286,98 @@ static BOOL replaceSwiftMethod(void **entry, void *replacement, void **original)
     return YES;
 }
 
+// Parts of a Swift class descriptor (swift/ABI/Metadata.h). A relative pointer is an offset from its own address; an
+// indirectable one with bit 0 set points to a pointer to the target.
+typedef struct {
+    uint32_t flags;
+    int32_t impl;
+} FMSwiftMethodDescriptor;
+
+typedef struct {
+    int32_t cls, method, impl;
+} FMSwiftMethodOverride;
+
+static const void *relativeTarget(const int32_t *field, BOOL indirectable) {
+    int32_t offset = *field;
+    if(!offset)
+        return NULL;
+    const uint8_t *target = (const uint8_t *)field + (indirectable ? (offset & ~1) : offset);
+    return indirectable && (offset & 1) ? *(const void *const *)target : target;
+}
+
+// A Swift class's vtable ({offset in words, entry count}, then that many method descriptors) and override table ({count},
+// then that many overrides), each NULL if it has none. NO if it isn't a non-generic Swift class.
+static BOOL swiftClassTables(Class cls, const uint32_t **vtable, const uint32_t **overrides) {
+    const uint8_t *metadata = (const uint8_t *)(__bridge void *)cls;
+    if(!cls || !(*(const uintptr_t *)(metadata + 32) & 2))
+        return NO;
+    const uint8_t *descriptor = *(const uint8_t *const *)(metadata + 64);
+    if(!descriptor)
+        return NO;
+    uint32_t flags = *(const uint32_t *)descriptor, classFlags = flags >> 16;
+    // A class (kind 16) that isn't generic
+    if((flags & 0x1F) != 16 || (flags & 0x80))
+        return NO;
+    // After the 44 bytes every class descriptor has: a resilient superclass, then how its metadata is initialized
+    const uint8_t *tables = descriptor + 44 + (classFlags & 0x2000 ? 4 : 0) + ((classFlags & 3) == 1 ? 12 : (classFlags & 3) == 2 ? 4 : 0);
+    *vtable = classFlags & 0x8000 ? (const uint32_t *)tables : NULL;
+    if(*vtable)
+        tables += 8 + (*vtable)[1] * sizeof(FMSwiftMethodDescriptor);
+    *overrides = classFlags & 0x4000 ? (const uint32_t *)tables : NULL;
+    return YES;
+}
+
+// 32.0 dropped the ObjC method, so there's no thunk to follow. sizeOfImageAttachment(at:) is entry 23 of MessageString's
+// 39-entry vtable from word 21 (0x160 in the metadata), an instance method that ChatMessageString overrides, in both 31.9
+// and 32.0. All of that is checked, so a vtable that changed leaves the sizes alone rather than replacing another method.
+#define FMMessageStringVTableOffset 21
+#define FMMessageStringVTableSize 39
+#define FMImageSizeVTableIndex 23
+
+static BOOL imageSizeVTableEntries(Class messageString, Class chatMessageString, void ***entry, void ***chatEntry) {
+    const uint32_t *vtable, *overrides, *chatVTable, *chatOverrides;
+    if(!messageString || !chatMessageString || class_getSuperclass(chatMessageString) != messageString
+       || !swiftClassTables(messageString, &vtable, &overrides) || !swiftClassTables(chatMessageString, &chatVTable, &chatOverrides)
+       || !vtable || vtable[0] != FMMessageStringVTableOffset || vtable[1] != FMMessageStringVTableSize || !chatOverrides)
+        return NO;
+    size_t slot = (FMMessageStringVTableOffset + FMImageSizeVTableIndex) * sizeof(void *);
+    // Class size and address point: the slot has to be in both classes' metadata
+    Class classes[] = {messageString, chatMessageString};
+    for(size_t i = 0; i < 2; i++) {
+        const uint8_t *metadata = (const uint8_t *)(__bridge void *)classes[i];
+        if(slot + sizeof(void *) > *(const uint32_t *)(metadata + 56) - *(const uint32_t *)(metadata + 60))
+            return NO;
+    }
+    const FMSwiftMethodDescriptor *method = (const FMSwiftMethodDescriptor *)(vtable + 2) + FMImageSizeVTableIndex;
+    void **messageStringEntry = (void **)((uint8_t *)(__bridge void *)messageString + slot);
+    void **chatMessageStringEntry = (void **)((uint8_t *)(__bridge void *)chatMessageString + slot);
+    // An instance method, not an accessor, that's still the original
+    if(method->flags != 0x10 || *messageStringEntry != relativeTarget(&method->impl, NO))
+        return NO;
+    const FMSwiftMethodOverride *chatOverride = (const FMSwiftMethodOverride *)(chatOverrides + 1);
+    for(uint32_t i = 0; i < chatOverrides[0]; i++) {
+        if(relativeTarget(&chatOverride[i].method, YES) == method && *chatMessageStringEntry == relativeTarget(&chatOverride[i].impl, NO)) {
+            *entry = messageStringEntry;
+            *chatEntry = chatMessageStringEntry;
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void hookEmoteSizes(void) {
     SEL selector = @selector(sizeOfImageAttachmentAtCharacterIndex:);
-    void **entry = swiftMethodEntry(objc_getClass("_TtC6Twitch13MessageString"), selector);
-    void **chatEntry = swiftMethodEntry(objc_getClass("_TtC6Twitch17ChatMessageString"), selector);
+    Class messageString = objc_getClass("_TtC6Twitch13MessageString"), chatMessageString = objc_getClass("_TtC6Twitch17ChatMessageString");
+    void **entry = swiftMethodEntry(messageString, selector);
+    void **chatEntry = swiftMethodEntry(chatMessageString, selector);
+    BOOL fromVTable = NO;
+    if(!entry && !chatEntry)
+        fromVTable = imageSizeVTableEntries(messageString, chatMessageString, &entry, &chatEntry);
     // Both or neither, so a message's attachments and images always agree
     if(entry && chatEntry && replaceSwiftMethod(entry, (void *)newMessageStringImageSize, (void **)&originalMessageStringImageSize)
        && replaceSwiftMethod(chatEntry, (void *)newChatMessageStringImageSize, (void **)&originalChatMessageStringImageSize)) {
         MessageStringLayoutManager = objc_getClass("_TtC6Twitch26MessageStringLayoutManager");
-        FMLog("Hooked emote sizes");
+        FMLog("Hooked emote sizes%s", fromVTable ? " (from the vtable)" : "");
     } else {
         FMLog("MessageString changed, emotes stay square (%d, %d)", entry != NULL, chatEntry != NULL);
     }
