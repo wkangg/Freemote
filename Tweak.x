@@ -1092,12 +1092,16 @@ static FMRecentMessages *recentMessagesForTask(NSURLSessionTask *task, NSURLRequ
 // to the React Native patch, which puts them above the chat's lines (see addHistory in FMReactNativePatch.m).
 // twitchMessages: a copy of Twitch's recentChatMessages, as they were handed over.
 static void addLateRecentMessages(FMRecentMessages *recent, NSArray *twitchMessages, NSString *channelID) {
-    if(!recent.messages.count)
+    if(!recent.messages.count) {
+        FMLog("Recent messages for %@ came in late, but there were none", recent.channelLogin);
         return;
+    }
     NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
     NSArray *merged = FMMergeChatHistory(twitchMessages, recent, deletedIDs);
-    if(!merged)
+    if(!merged) {
+        FMLog("Recent messages for %@ came in late, but couldn't be merged", recent.channelLogin);
         return;
+    }
     NSMutableSet<NSString *> *twitchIDs = [[NSMutableSet alloc] init];
     for(NSDictionary *message in twitchMessages) {
         if([message isKindOfClass:[NSDictionary class]] && [message[@"id"] isKindOfClass:[NSString class]])
@@ -1110,14 +1114,15 @@ static void addLateRecentMessages(FMRecentMessages *recent, NSArray *twitchMessa
             break;
         [older addObject:message];
     }
+    // Also dims Twitch's own messages that were deleted, even when none are older
+    if(deletedIDs.count)
+        sendDeletedHistoryMessages(deletedIDs);
     if(!older.count) {
         FMLog("Recent messages for %@ came in late, but none are older than its chat history", recent.channelLogin);
         return;
     }
     NSMutableDictionary *channel = [@{@"__typename": @"Channel", @"id": channelID, @"recentChatMessages": older} mutableCopy];
     addEmotesToChatHistory(channel, NO);
-    if(deletedIDs.count)
-        sendDeletedHistoryMessages(deletedIDs);
     if(sendLateHistory(recent.channelLogin, @{@"channel": channel}))
         FMLog("Recent messages for %@ came in late: sent %lu older than its chat history to add above it", recent.channelLogin, (unsigned long)older.count);
 }
