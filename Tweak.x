@@ -28,7 +28,7 @@
 #define FMBatchedEmoteSetsTimeout 1.5
 
 // How long the React Native screen's chat history waits for the channel's recent messages (see FMRecentMessages.h).
-// Twitch can batch other queries into the same request, which wait with it.
+// Twitch can batch other queries into the same request, which wait with it, so then it's FMBatchedEmoteSetsTimeout.
 #define FMRecentMessagesTimeout 2.5
 
 static Class EmoteToken, TextToken, MessagesReceived;
@@ -1246,9 +1246,9 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
     if(recentMessages.done)
         recentMessages = nil;
     if(emoteSetsChannel || recentMessages) {
-        double timeout = recentMessages ? FMRecentMessagesTimeout : 0;
+        BOOL batched = gqlOperations(task.originalRequest).count > 1;
+        double timeout = !recentMessages ? 0 : batched ? FMBatchedEmoteSetsTimeout : FMRecentMessagesTimeout;
         if(emoteSetsChannel) {
-            BOOL batched = gqlOperations(task.originalRequest).count > 1;
             timeout = MAX(timeout, batched ? FMBatchedEmoteSetsTimeout : FMHistoryEmoteTimeout);
             FMLog("Emote picker for channel %@ is waiting for its emotes (%.1fs max%s)", emoteSetsChannel, timeout, batched ? ", batched with other queries" : "");
         }

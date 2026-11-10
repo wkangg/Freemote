@@ -83,6 +83,9 @@ static NSMutableDictionary *textFragment(NSString *text) {
 static NSMutableArray *fragmentsFromText(NSString *text, NSString *emotesTag) {
     NSData *utf32 = [text dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
     NSUInteger length = utf32.length / 4;
+    // Text that can't be converted (an unpaired surrogate) stays whole
+    if(!utf32)
+        return [@[textFragment(text)] mutableCopy];
     NSString *(^substring)(NSUInteger, NSUInteger) = ^NSString *(NSUInteger from, NSUInteger to) {
         return [[NSString alloc] initWithData:[utf32 subdataWithRange:NSMakeRange(from * 4, (to - from) * 4)] encoding:NSUTF32LittleEndianStringEncoding] ?: @"";
     };
@@ -179,7 +182,8 @@ NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line) {
         @"__typename": @"Message",
         @"id": tags[@"id"],
         @"deletedAt": [NSNull null],
-        @"sentAt": [dateFormatter(YES) stringFromDate:[NSDate dateWithTimeIntervalSince1970:sentMilliseconds / 1000.0]],
+        // Half a millisecond on, since the formatter cuts the decimals off rather than rounding
+        @"sentAt": [dateFormatter(YES) stringFromDate:[NSDate dateWithTimeIntervalSince1970:(sentMilliseconds + 0.5) / 1000.0]],
         @"content": [@{@"__typename": @"MessageContent", @"text": text, @"fragments": fragmentsFromText(text, tags[@"emotes"] ?: @"")} mutableCopy],
         @"parentMessage": parentMessage,
         @"threadParentMessage": threadParentMessage,
@@ -192,20 +196,22 @@ NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line) {
 }
 
 NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary *> *recentMessages) {
-    NSMutableSet<NSString *> *twitchIDs = [[NSMutableSet alloc] init];
+    NSMutableSet<NSString *> *seenIDs = [[NSMutableSet alloc] init];
     NSMutableArray<NSArray *> *dated = [[NSMutableArray alloc] init]; // [date, message]
     for(NSDictionary *message in twitchMessages) {
         NSString *messageID = [message isKindOfClass:[NSDictionary class]] ? message[@"id"] : nil;
         NSDate *date = [messageID isKindOfClass:[NSString class]] ? dateFromSentAt(message[@"sentAt"]) : nil;
         if(!date)
             return nil;
-        [twitchIDs addObject:messageID];
+        [seenIDs addObject:messageID];
         [dated addObject:@[date, message]];
     }
     for(NSMutableDictionary *message in recentMessages) {
-        NSDate *date = [twitchIDs containsObject:message[@"id"]] ? nil : dateFromSentAt(message[@"sentAt"]);
-        if(date)
-            [dated addObject:@[date, message]];
+        NSDate *date = [seenIDs containsObject:message[@"id"]] ? nil : dateFromSentAt(message[@"sentAt"]);
+        if(!date)
+            continue;
+        [seenIDs addObject:message[@"id"]];
+        [dated addObject:@[date, message]];
     }
     [dated sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
         return [(NSDate *)a[0] compare:b[0]];
