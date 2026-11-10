@@ -1,7 +1,7 @@
 #import "FMRecentMessages.h"
 #import "FMLog.h"
 
-// More than the chat holds: the limit counts the moderated messages the service then leaves out
+// More than the chat holds: deleted messages are among them, and are left out unless they're kept
 #define FMRecentMessagesRequestLimit 250
 #define FMRecentMessagesRequestTimeout 5
 
@@ -129,7 +129,7 @@ static NSDictionary *user(NSString *userID, NSString *login, NSString *displayNa
 
 // "@<tags> :<login>!<login>@<login>.tmi.twitch.tv PRIVMSG #<channel> :<text>". The service leaves the ":" off a text
 // of one word.
-NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line) {
+NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted) {
     NSRange tagsEnd = [line isKindOfClass:[NSString class]] ? [line rangeOfString:@" "] : (NSRange){NSNotFound, 0};
     if(tagsEnd.location == NSNotFound || ![line hasPrefix:@"@"])
         return nil;
@@ -142,8 +142,10 @@ NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line) {
     NSRange loginEnd = [words[0] rangeOfString:@"!"];
     NSString *login = loginEnd.location == NSNotFound ? nil : [words[0] substringWithRange:NSMakeRange(1, loginEnd.location - 1)];
     long long sentMilliseconds = tags[@"tmi-sent-ts"].longLongValue;
-    if(!tags[@"id"].length || !tags[@"user-id"].length || !login.length || sentMilliseconds <= 0 || [tags[@"rm-deleted"] isEqualToString:@"1"])
+    if(!tags[@"id"].length || !tags[@"user-id"].length || !login.length || sentMilliseconds <= 0)
         return nil;
+    if(deleted)
+        *deleted = [tags[@"rm-deleted"] isEqualToString:@"1"];
 
     NSString *text = [rest substringFromIndex:words[0].length + words[1].length + words[2].length + 3];
     if([text hasPrefix:@":"])
@@ -195,21 +197,46 @@ NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line) {
     } mutableCopy];
 }
 
-NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary *> *recentMessages) {
+NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMessages, NSMutableSet<NSString *> *deletedIDs) {
+    NSSet<NSString *> *recentDeletedIDs = recentMessages.deletedIDs;
+    NSMutableSet<NSString *> *recentIDs = [[NSMutableSet alloc] init];
+    for(NSMutableDictionary *message in recentMessages.messages)
+        [recentIDs addObject:message[@"id"]];
+
     NSMutableSet<NSString *> *seenIDs = [[NSMutableSet alloc] init];
     NSMutableArray<NSArray *> *dated = [[NSMutableArray alloc] init]; // [date, message]
-    for(NSDictionary *message in twitchMessages) {
+    for(NSMutableDictionary *message in twitchMessages) {
         NSString *messageID = [message isKindOfClass:[NSDictionary class]] ? message[@"id"] : nil;
         NSDate *date = [messageID isKindOfClass:[NSString class]] ? dateFromSentAt(message[@"sentAt"]) : nil;
         if(!date)
             return nil;
+        BOOL deleted = !isNull(message[@"deletedAt"]);
+        if(deleted && deletedIDs) {
+            // The service's copy is sure to have its text
+            if([recentIDs containsObject:messageID]) {
+                [deletedIDs addObject:messageID];
+                continue;
+            }
+            NSDictionary *content = message[@"content"];
+            NSString *text = [content isKindOfClass:[NSDictionary class]] ? content[@"text"] : nil;
+            if([message isKindOfClass:[NSMutableDictionary class]] && [text isKindOfClass:[NSString class]] && text.length) {
+                message[@"deletedAt"] = [NSNull null];
+                [deletedIDs addObject:messageID];
+            }
+        } else if(!deleted && [recentDeletedIDs containsObject:messageID]) {
+            // Deleted since Twitch answered, or Twitch doesn't say so
+            [deletedIDs addObject:messageID];
+        }
         [seenIDs addObject:messageID];
         [dated addObject:@[date, message]];
     }
-    for(NSMutableDictionary *message in recentMessages) {
-        NSDate *date = [seenIDs containsObject:message[@"id"]] ? nil : dateFromSentAt(message[@"sentAt"]);
+    for(NSMutableDictionary *message in recentMessages.messages) {
+        BOOL deleted = [recentDeletedIDs containsObject:message[@"id"]];
+        NSDate *date = [seenIDs containsObject:message[@"id"]] || (deleted && !deletedIDs) ? nil : dateFromSentAt(message[@"sentAt"]);
         if(!date)
             continue;
+        if(deleted)
+            [deletedIDs addObject:message[@"id"]];
         [seenIDs addObject:message[@"id"]];
         [dated addObject:@[date, message]];
     }
@@ -227,6 +254,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary
 @interface FMRecentMessages ()
 @property (atomic, readwrite) BOOL done;
 @property (atomic, readwrite) NSArray<NSMutableDictionary *> *messages;
+@property (atomic, readwrite) NSSet<NSString *> *deletedIDs;
 @end
 
 @implementation FMRecentMessages {
@@ -238,10 +266,11 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary
         return nil;
     _channelLogin = [login copy];
     _messages = @[];
+    _deletedIDs = [NSSet set];
     _request = dispatch_group_create();
     dispatch_group_enter(_request);
 
-    NSString *url = [NSString stringWithFormat:@"https://recent-messages.robotty.de/api/v2/recent-messages/%@?limit=%d&hide_moderation_messages=true&hide_moderated_messages=true", login, FMRecentMessagesRequestLimit];
+    NSString *url = [NSString stringWithFormat:@"https://recent-messages.robotty.de/api/v2/recent-messages/%@?limit=%d&hide_moderation_messages=true", login, FMRecentMessagesRequestLimit];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     request.timeoutInterval = FMRecentMessagesRequestTimeout;
     [request setValue:@"Freemote/" FREEMOTE_VERSION forHTTPHeaderField:@"User-Agent"];
@@ -260,14 +289,20 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary
         FMLog("Recent messages for %@ failed after %.1fs (%lu bytes): %@", _channelLogin, duration, (unsigned long)data.length, error.localizedDescription);
     } else {
         NSMutableArray<NSMutableDictionary *> *messages = [[NSMutableArray alloc] init];
+        NSMutableSet<NSString *> *deletedIDs = [[NSMutableSet alloc] init];
         for(NSString *line in lines) {
-            NSMutableDictionary *message = FMChatHistoryMessageFromIRCLine(line);
-            if(message)
-                [messages addObject:message];
+            BOOL deleted = NO;
+            NSMutableDictionary *message = FMChatHistoryMessageFromIRCLine(line, &deleted);
+            if(!message)
+                continue;
+            [messages addObject:message];
+            if(deleted)
+                [deletedIDs addObject:message[@"id"]];
         }
+        self.deletedIDs = deletedIDs;
         self.messages = messages;
         // error_code: e.g. channel_not_joined the first time anyone asks for a channel, with no messages yet
-        FMLog("Recent messages for %@: %lu chat messages in %lu lines in %.1fs (%@)", _channelLogin, (unsigned long)messages.count, (unsigned long)lines.count, duration,
+        FMLog("Recent messages for %@: %lu chat messages (%lu deleted) in %lu lines in %.1fs (%@)", _channelLogin, (unsigned long)messages.count, (unsigned long)deletedIDs.count, (unsigned long)lines.count, duration,
               isNull(json[@"error_code"]) ? @"no error" : json[@"error_code"]);
     }
     self.done = YES;

@@ -17,11 +17,17 @@
 @property (atomic, readonly) NSArray<NSMutableDictionary *> *messages;
 // Calls the block on a background queue once the request has finished, or right away if it has
 - (void)whenDone:(dispatch_block_t)block;
+
+// The IDs of the messages a moderator deleted, or whose sender was timed out or banned (the service's rm-deleted)
+@property (atomic, readonly) NSSet<NSString *> *deletedIDs;
 @end
 
-// One IRC line (as the service returns them) as a recentChatMessages message, or nil if it isn't a chat message
-NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line);
+// One IRC line (as the service returns them) as a recentChatMessages message, or nil if it isn't a chat message.
+// deleted: whether the service says it was deleted.
+NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted);
 
 // Twitch's recentChatMessages with the messages from recentMessages it doesn't have, by time, cut down to the newest
 // FMChatHistoryLimit. Twitch's copy of a message wins. nil if one of Twitch's messages has no ID or time to go by.
-NSArray *FMMergeChatHistory(NSArray *twitchMessages, NSArray<NSMutableDictionary *> *recentMessages);
+// Deleted messages are left out, unless deletedIDs is given: then they stay (the chat drops any with a deletedAt, so
+// Twitch's own lose theirs) and their IDs are added to it, for whoever draws them to tell them apart.
+NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMessages, NSMutableSet<NSString *> *deletedIDs);

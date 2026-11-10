@@ -66,7 +66,7 @@ void FMRegisterDefaults(void) {
     if(section == 0)
         return @"Emotes from each provider, global and per channel.";
     if(section == 1)
-        return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed. Chat also stays when a moderator clears it.";
+        return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed, including ones in the chat history. Chat also stays when a moderator clears it.";
     if(section == 2)
         return @"Fills chat with up to 150 earlier messages when you open a stream, from recent-messages.robotty.de, which is sent the channel's name. Not on vertical streams.";
     if(section == 3)

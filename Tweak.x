@@ -1047,6 +1047,11 @@ static void addEmoteCardLink(RCTParagraphComponentView *view) {
 
 static char recentMessagesKey;
 
+// Deleted messages in the history are kept like live ones (see FMReactNativePatch.m), defined with the rest of the
+// React Native patch's calls
+static BOOL canKeepDeletedHistoryMessages(void);
+static void sendDeletedHistoryMessages(NSSet<NSString *> *messageIDs);
+
 // The channel a React Native ChatHistory operation asks for (the native one has no channelLogin), or nil
 static NSString *chatHistoryChannelLoginFor(NSDictionary *operation) {
     if(![operation isKindOfClass:[NSDictionary class]] || ![@"ChatHistory" isEqual:operation[@"operationName"]])
@@ -1103,15 +1108,19 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             continue;
         }
         NSArray *messages = [channel[@"recentChatMessages"] isKindOfClass:[NSArray class]] ? channel[@"recentChatMessages"] : @[];
-        NSArray *merged = FMMergeChatHistory(messages, recent.messages);
+        NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
+        NSArray *merged = FMMergeChatHistory(messages, recent, deletedIDs);
         if(!merged) {
             // The response shape changed
             FMLog("ChatHistory for %@ has a message without an ID or time, its chat history stays as is", recent.channelLogin);
             continue;
         }
         channel[@"recentChatMessages"] = merged;
-        FMLog("Chat history for %@: %lu messages from Twitch and %lu recent messages make %lu", recent.channelLogin,
-              (unsigned long)messages.count, (unsigned long)recent.messages.count, (unsigned long)merged.count);
+        // Before the response is handed over, so the rows know by the time they're drawn
+        if(deletedIDs.count)
+            sendDeletedHistoryMessages(deletedIDs);
+        FMLog("Chat history for %@: %lu messages from Twitch and %lu recent messages make %lu (%lu deleted, %s)", recent.channelLogin,
+              (unsigned long)messages.count, (unsigned long)recent.messages.count, (unsigned long)merged.count, (unsigned long)deletedIDs.count, deletedIDs ? "kept" : "left out");
     }
 }
 
@@ -1514,6 +1523,20 @@ static NSString *ircLineWithEmotes(NSString *line) {
 // until the patch logs that it's ready.
 static __weak RCTInstance *reactInstance;
 static atomic_bool reactNativeReadyForEmotes;
+// Whether the patch was loaded with freemoteKeepDeletedMessages on: the setting applies after restarting Twitch
+static atomic_bool reactNativeKeepsDeletedMessages;
+
+// Only when the patch can be told which ones they are: it's what dims them
+static BOOL canKeepDeletedHistoryMessages(void) {
+    return atomic_load(&reactNativeKeepsDeletedMessages) && atomic_load(&reactNativeReadyForEmotes) && reactInstance != nil
+        && [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey];
+}
+
+static void sendDeletedHistoryMessages(NSSet<NSString *> *messageIDs) {
+    RCTInstance *instance = reactInstance;
+    if(atomic_load(&reactNativeReadyForEmotes) && instance)
+        [instance callFunctionOnJSModule:@"Freemote" method:@"setDeletedHistoryMessages" args:@[messageIDs.allObjects]];
+}
 static dispatch_queue_t reactNativeEmoteQueue; // serial, so a channel's last table sent is its newest
 
 #define FMReactNativeReadyMessage @"[Freemote] Ready for emote tables"
@@ -1576,14 +1599,16 @@ static void watchForReactNativeReady(void) {
 - (void)_loadScriptFromSource:(id)source {
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"freemote-react-native.js"];
     NSError *error;
+    BOOL keepDeletedMessages = [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey];
     if(![self respondsToSelector:@selector(registerSegmentWithId:path:)])
         FMLog("RCTInstance changed, React Native emotes stay square");
-    else if(![[NSString stringWithFormat:@"globalThis.freemoteKeepDeletedMessages = %@;\n%@", [NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey] ? @"true" : @"false", FMReactNativePatchSource]
+    else if(![[NSString stringWithFormat:@"globalThis.freemoteKeepDeletedMessages = %@;\n%@", keepDeletedMessages ? @"true" : @"false", FMReactNativePatchSource]
                 writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
         FMLog("Couldn't write the React Native patch, emotes stay square: %@", error.localizedDescription);
     else {
         // A new runtime: wait for its patch to say it's ready
         atomic_store(&reactNativeReadyForEmotes, false);
+        atomic_store(&reactNativeKeepsDeletedMessages, keepDeletedMessages);
         if([self respondsToSelector:@selector(callFunctionOnJSModule:method:args:)]) {
             reactInstance = self;
             watchForReactNativeReady();
