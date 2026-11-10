@@ -1122,6 +1122,7 @@ static char recentMessagesKey;
 // React Native patch's calls
 static BOOL canKeepDeletedHistoryMessages(void);
 static void sendDeletedHistoryMessages(NSSet<NSString *> *messageIDs);
+static BOOL sendLateHistory(NSString *channelLogin, NSDictionary *data);
 
 // The channel a React Native ChatHistory operation asks for (the native one has no channelLogin), or nil
 static NSString *chatHistoryChannelLoginFor(NSDictionary *operation) {
@@ -1158,14 +1159,50 @@ static FMRecentMessages *recentMessagesForTask(NSURLSessionTask *task, NSURLRequ
     return [recent isKindOfClass:[FMRecentMessages class]] ? recent : nil;
 }
 
+// Recent messages that come in after Twitch's history was handed over: the ones from before Twitch's oldest message go
+// to the React Native patch, which puts them above the chat's lines (see addHistory in FMReactNativePatch.m).
+// twitchMessages: a copy of Twitch's recentChatMessages, as they were handed over.
+static void addLateRecentMessages(FMRecentMessages *recent, NSArray *twitchMessages, NSString *channelID) {
+    if(!recent.messages.count) {
+        FMLog("Recent messages for %@ came in late, but there were none", recent.channelLogin);
+        return;
+    }
+    NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
+    NSArray *merged = FMMergeChatHistory(twitchMessages, recent, deletedIDs);
+    if(!merged) {
+        FMLog("Recent messages for %@ came in late, but couldn't be merged", recent.channelLogin);
+        return;
+    }
+    NSMutableSet<NSString *> *twitchIDs = [[NSMutableSet alloc] init];
+    for(NSDictionary *message in twitchMessages) {
+        if([message isKindOfClass:[NSDictionary class]] && [message[@"id"] isKindOfClass:[NSString class]])
+            [twitchIDs addObject:message[@"id"]];
+    }
+    // Oldest first, so everything before Twitch's first message is older than all of Twitch's history
+    NSMutableArray *older = [[NSMutableArray alloc] init];
+    for(NSDictionary *message in merged) {
+        if([twitchIDs containsObject:message[@"id"]])
+            break;
+        [older addObject:message];
+    }
+    // Also dims Twitch's own messages that were deleted, even when none are older
+    if(deletedIDs.count)
+        sendDeletedHistoryMessages(deletedIDs);
+    if(!older.count) {
+        FMLog("Recent messages for %@ came in late, but none are older than its chat history", recent.channelLogin);
+        return;
+    }
+    NSMutableDictionary *channel = [@{@"__typename": @"Channel", @"id": channelID, @"recentChatMessages": older} mutableCopy];
+    addEmotesToChatHistory(channel, NO);
+    if(sendLateHistory(recent.channelLogin, @{@"channel": channel}))
+        FMLog("Recent messages for %@ came in late: sent %lu older than its chat history to add above it", recent.channelLogin, (unsigned long)older.count);
+}
+
 // Before emotes are added, so the recent messages get ours too
 static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *recent) {
     if(!recent)
         return;
-    if(!recent.done) {
-        FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
-        return;
-    }
+    BOOL late = !recent.done;
     NSArray *operations = gqlOperations(request);
     NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
     for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
@@ -1179,6 +1216,21 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             continue;
         }
         NSArray *messages = [channel[@"recentChatMessages"] isKindOfClass:[NSArray class]] ? channel[@"recentChatMessages"] : @[];
+        if(late) {
+            // A copy: the response is still being rewritten (emotes) when the request can finish
+            NSData *messagesData = [NSJSONSerialization dataWithJSONObject:messages options:0 error:nil];
+            NSArray *twitchMessages = messagesData ? [NSJSONSerialization JSONObjectWithData:messagesData options:NSJSONReadingMutableContainers error:nil] : nil;
+            NSString *channelID = channel[@"id"];
+            if(![twitchMessages isKindOfClass:[NSArray class]] || !isChannelID(channelID)) {
+                FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
+                continue;
+            }
+            FMLog("Recent messages for %@ didn't come in time, they'll be added when they do", recent.channelLogin);
+            [recent whenDone:^{
+                addLateRecentMessages(recent, twitchMessages, channelID);
+            }];
+            continue;
+        }
         NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
         NSArray *merged = FMMergeChatHistory(messages, recent, deletedIDs);
         if(!merged) {
@@ -1613,6 +1665,18 @@ static void sendDeletedHistoryMessages(NSSet<NSString *> *messageIDs) {
     if(atomic_load(&reactNativeReadyForEmotes) && instance)
         [instance callFunctionOnJSModule:@"Freemote" method:@"setDeletedHistoryMessages" args:@[messageIDs.allObjects]];
 }
+
+// data is ChatHistory's data: {channel: {id, recentChatMessages}}. YES if it was sent.
+static BOOL sendLateHistory(NSString *channelLogin, NSDictionary *data) {
+    RCTInstance *instance = reactInstance;
+    if(!atomic_load(&reactNativeReadyForEmotes) || !instance) {
+        FMLog("Recent messages for %@ came in late, but React Native can't take them", channelLogin);
+        return NO;
+    }
+    [instance callFunctionOnJSModule:@"Freemote" method:@"addHistory" args:@[channelLogin, data]];
+    return YES;
+}
+
 static dispatch_queue_t reactNativeEmoteQueue; // serial, so a channel's last table sent is its newest
 
 #define FMReactNativeReadyMessage @"[Freemote] Ready for emote tables"
