@@ -2,11 +2,12 @@
 
 // NSUserDefaults keys, all on by default except the debug log. The emote ones are read when emotes load, and the deleted
 // message one when the React Native screen loads, so those apply after restarting Twitch. Native chat checks deleted
-// messages on each one, channel points on each claim, and the log on each line.
+// messages on each one, chat history each time a chat opens, channel points on each claim, and the log on each line.
 extern NSString *const FMBTTVEnabledKey;
 extern NSString *const FMFFZEnabledKey;
 extern NSString *const FMSevenTVEnabledKey;
 extern NSString *const FMKeepDeletedMessagesKey;
+extern NSString *const FMChatHistoryKey;
 extern NSString *const FMClaimChannelPointsKey;
 extern NSString *const FMDebugLogKey;
 

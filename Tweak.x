@@ -4,6 +4,7 @@
 #import "FMEmoteManager.h"
 #import "FMLog.h"
 #import "FMReactNativePatch.h"
+#import "FMRecentMessages.h"
 #import "FMSettings.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
@@ -17,7 +18,7 @@
 #define FMReactNativeSegmentID 0x46524D
 
 // How long a chat history or VOD chat response on a native screen is held back waiting for the channel's emotes.
-// React Native chat history isn't held: it gets the emotes that are in by then, and its chat rows add the rest as
+// React Native chat history isn't held for them: it gets the emotes that are in by then, and its chat rows add the rest as
 // they load. (Unless Twitch batched it into one request with the emote picker's ChatEmoteSets, which waits up to
 // FMBatchedEmoteSetsTimeout.)
 #define FMHistoryEmoteTimeout 5
@@ -25,6 +26,10 @@
 // How long the React Native emote picker's emote sets wait for the channel's emotes when other queries were batched
 // into the same request (they wait too). On their own they wait FMHistoryEmoteTimeout.
 #define FMBatchedEmoteSetsTimeout 1.5
+
+// How long the React Native screen's chat history waits for the channel's recent messages (see FMRecentMessages.h).
+// Twitch can batch other queries into the same request, which wait with it.
+#define FMRecentMessagesTimeout 2.5
 
 static Class EmoteToken, TextToken, MessagesReceived;
 static FMEmoteManager *emoteManager;
@@ -1034,15 +1039,92 @@ static void addEmoteCardLink(RCTParagraphComponentView *view) {
 
 %end
 
+#pragma mark - Recent messages
+
+// Twitch's ChatHistory only has a chat's last few messages, so the React Native screen's gets the ones from
+// recent-messages.robotty.de merged in. Its chat (prependHistory) puts the history above whatever came in live, leaves
+// out messages it already has, and keeps 150 lines in all. Native chat's ChatHistory is another query, left as is.
+
+static char recentMessagesKey;
+
+// The channel a React Native ChatHistory operation asks for (the native one has no channelLogin), or nil
+static NSString *chatHistoryChannelLoginFor(NSDictionary *operation) {
+    if(![operation isKindOfClass:[NSDictionary class]] || ![@"ChatHistory" isEqual:operation[@"operationName"]])
+        return nil;
+    NSDictionary *variables = operation[@"variables"];
+    NSString *login = [variables isKindOfClass:[NSDictionary class]] ? variables[@"channelLogin"] : nil;
+    if(![login isKindOfClass:[NSString class]] || !login.length)
+        return nil;
+    // It goes into a URL
+    login = login.lowercaseString;
+    NSCharacterSet *loginCharacters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz0123456789_"];
+    return [login rangeOfCharacterFromSet:loginCharacters.invertedSet].location == NSNotFound ? login : nil;
+}
+
+// The recent messages for a React Native task's ChatHistory, or nil for any other task. The request for them starts
+// the first time this is called, which is when the task is sent.
+static FMRecentMessages *recentMessagesForTask(NSURLSessionTask *task, NSURLRequest *request) {
+    id recent = objc_getAssociatedObject(task, &recentMessagesKey);
+    if(!recent) {
+        recent = [NSNull null];
+        if([NSUserDefaults.standardUserDefaults boolForKey:FMChatHistoryKey]) {
+            for(NSDictionary *operation in gqlOperations(request)) {
+                NSString *login = chatHistoryChannelLoginFor(operation);
+                if(!login)
+                    continue;
+                FMLog("Getting recent messages for %@ to add to its chat history", login);
+                recent = [[FMRecentMessages alloc] initWithChannelLogin:login];
+                break;
+            }
+        }
+        objc_setAssociatedObject(task, &recentMessagesKey, recent, OBJC_ASSOCIATION_RETAIN);
+    }
+    return [recent isKindOfClass:[FMRecentMessages class]] ? recent : nil;
+}
+
+// Before emotes are added, so the recent messages get ours too
+static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *recent) {
+    if(!recent)
+        return;
+    if(!recent.done) {
+        FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
+        return;
+    }
+    NSArray *operations = gqlOperations(request);
+    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
+    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
+        if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operations[i])])
+            continue;
+        NSDictionary *response = responses[i];
+        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
+        NSMutableDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
+        if(![channel isKindOfClass:[NSMutableDictionary class]]) {
+            FMLog("ChatHistory for %@ has no channel, its chat history stays as is", recent.channelLogin);
+            continue;
+        }
+        NSArray *messages = [channel[@"recentChatMessages"] isKindOfClass:[NSArray class]] ? channel[@"recentChatMessages"] : @[];
+        NSArray *merged = FMMergeChatHistory(messages, recent.messages);
+        if(!merged) {
+            // The response shape changed
+            FMLog("ChatHistory for %@ has a message without an ID or time, its chat history stays as is", recent.channelLogin);
+            continue;
+        }
+        channel[@"recentChatMessages"] = merged;
+        FMLog("Chat history for %@: %lu messages from Twitch and %lu recent messages make %lu", recent.channelLogin,
+              (unsigned long)messages.count, (unsigned long)recent.messages.count, (unsigned long)merged.count);
+    }
+}
+
 #pragma mark - Held back responses
 
-static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL waitForEmotes) {
+static NSData *responseDataWithEmotes(NSData *data, NSURLRequest *request, BOOL waitForEmotes, FMRecentMessages *recentMessages) {
     NSError *error;
     id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
     if(!json) {
         FMLog("Held back response isn't JSON (%lu bytes), left as is: %@", (unsigned long)data.length, error.localizedDescription);
         return data;
     }
+    addRecentMessages(json, request, recentMessages);
     addEmotesToChatHistory(json, waitForEmotes);
     addEmoteCards(json, request);
     addEmotePickerSets(json, request);
@@ -1096,7 +1178,9 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
     objc_setAssociatedObject(task, &heldResponseBufferKey, [NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if(error)
         FMLog("Held back request failed, left as is: %@", error.localizedDescription);
-    return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest, waitForEmotes);
+    // Only set on React Native's ChatHistory tasks
+    id recentMessages = objc_getAssociatedObject(task, &recentMessagesKey);
+    return error ? buffer : responseDataWithEmotes(buffer, task.originalRequest, waitForEmotes, [recentMessages isKindOfClass:[FMRecentMessages class]] ? recentMessages : nil);
 }
 
 // Apollo (native screens) and React Native's fetch (the React Native stream screen) both collect a task's data and
@@ -1133,6 +1217,14 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 
 %hook RCTHTTPRequestHandler
 
+// Recent messages are asked for as the chat history request goes out, so they're usually in by the time it's answered
+- (NSURLSessionDataTask *)sendRequest:(NSURLRequest *)request withDelegate:(id)delegate {
+    NSURLSessionDataTask *task = %orig;
+    if(task && [request.URL.host isEqualToString:@"gql.twitch.tv"])
+        recentMessagesForTask(task, request);
+    return task;
+}
+
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
     if(!holdResponseData(dataTask, data))
         %orig;
@@ -1141,19 +1233,31 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     FMChannelPointsNoteRequest(task.originalRequest, session, NO);
 
-    // The emote picker only reads its sets when chat opens, so ChatEmoteSets waits for the channel's emotes. Not by
-    // blocking: every React Native request shares this delegate queue. The task is finished later on the same queue
-    // instead. Twitch's Apollo batches queries sent together (badges, locked emotes, sometimes chat history) into one
-    // request, which all wait with it, so a batch only waits briefly.
-    NSString *emoteSetsChannel = !error && heldResponseBuffer(task) ? emoteSetsChannelID(task.originalRequest) : nil;
-    if(emoteSetsChannel && ![emoteManager hasEmotesForChannel:emoteSetsChannel] && session.delegateQueue) {
-        BOOL batched = gqlOperations(task.originalRequest).count > 1;
-        double timeout = batched ? FMBatchedEmoteSetsTimeout : FMHistoryEmoteTimeout;
-        FMLog("Emote picker for channel %@ is waiting for its emotes (%.1fs max%s)", emoteSetsChannel, timeout, batched ? ", batched with other queries" : "");
+    // The emote picker only reads its sets when chat opens, so ChatEmoteSets waits for the channel's emotes, and chat
+    // history waits for the channel's recent messages. Not by blocking: every React Native request shares this delegate
+    // queue. The task is finished later on the same queue instead. Twitch's Apollo batches queries sent together
+    // (badges, locked emotes, sometimes chat history) into one request, which all wait with it, so a batch only waits
+    // briefly for emotes.
+    BOOL held = !error && heldResponseBuffer(task) && session.delegateQueue;
+    NSString *emoteSetsChannel = held ? emoteSetsChannelID(task.originalRequest) : nil;
+    if(emoteSetsChannel && [emoteManager hasEmotesForChannel:emoteSetsChannel])
+        emoteSetsChannel = nil;
+    FMRecentMessages *recentMessages = held ? recentMessagesForTask(task, task.originalRequest) : nil;
+    if(recentMessages.done)
+        recentMessages = nil;
+    if(emoteSetsChannel || recentMessages) {
+        double timeout = recentMessages ? FMRecentMessagesTimeout : 0;
+        if(emoteSetsChannel) {
+            BOOL batched = gqlOperations(task.originalRequest).count > 1;
+            timeout = MAX(timeout, batched ? FMBatchedEmoteSetsTimeout : FMHistoryEmoteTimeout);
+            FMLog("Emote picker for channel %@ is waiting for its emotes (%.1fs max%s)", emoteSetsChannel, timeout, batched ? ", batched with other queries" : "");
+        }
+        if(recentMessages)
+            FMLog("Chat history for %@ is waiting for its recent messages (%.1fs max)", recentMessages.channelLogin, timeout);
         NSOperationQueue *queue = session.delegateQueue;
         // Logos' self isn't retained by blocks; React Native can free its handler (reload) during the wait
         RCTHTTPRequestHandler *handler = self;
-        // Whichever comes first: the emotes or the timeout
+        // Whichever comes first: everything it waits for or the timeout
         __block BOOL finished = NO;
         NSObject *finishLock = [[NSObject alloc] init];
         dispatch_block_t finish = ^{
@@ -1169,7 +1273,20 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
                 %orig(session, task, error);
             }];
         };
-        loadChannelEmotes(emoteSetsChannel, finish);
+        dispatch_group_t waits = dispatch_group_create();
+        if(emoteSetsChannel) {
+            dispatch_group_enter(waits);
+            loadChannelEmotes(emoteSetsChannel, ^{
+                dispatch_group_leave(waits);
+            });
+        }
+        if(recentMessages) {
+            dispatch_group_enter(waits);
+            [recentMessages whenDone:^{
+                dispatch_group_leave(waits);
+            }];
+        }
+        dispatch_group_notify(waits, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), finish);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), finish);
         return;
     }

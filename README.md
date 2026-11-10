@@ -13,6 +13,8 @@ Originally written by [gilesgc](https://github.com/gilesgc/Freemote); this fork 
 - Emotes show up as each provider loads, even on messages that came in first
 - Deleted messages, and messages from users who were timed out or banned, stay in chat, dimmed, and chat stays when a
   moderator clears it
+- Chat history from before you opened a stream, up to 150 messages, from
+  [recent-messages](https://recent-messages.robotty.de) (React Native chat only)
 - Channel points bonuses claimed as soon as they show up
 - A Freemote page at the bottom of the account menu to turn each feature on or off
 

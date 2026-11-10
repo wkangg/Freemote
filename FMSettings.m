@@ -5,6 +5,7 @@ NSString *const FMBTTVEnabledKey = @"FreemoteBTTVEnabled";
 NSString *const FMFFZEnabledKey = @"FreemoteFFZEnabled";
 NSString *const FMSevenTVEnabledKey = @"FreemoteSevenTVEnabled";
 NSString *const FMKeepDeletedMessagesKey = @"FreemoteKeepDeletedMessages";
+NSString *const FMChatHistoryKey = @"FreemoteChatHistory";
 NSString *const FMClaimChannelPointsKey = @"FreemoteClaimChannelPoints";
 NSString *const FMDebugLogKey = @"FreemoteDebugLog";
 
@@ -14,6 +15,7 @@ void FMRegisterDefaults(void) {
         FMFFZEnabledKey: @YES,
         FMSevenTVEnabledKey: @YES,
         FMKeepDeletedMessagesKey: @YES,
+        FMChatHistoryKey: @YES,
         FMClaimChannelPointsKey: @YES,
         FMDebugLogKey: @NO,
     }];
@@ -29,6 +31,7 @@ void FMRegisterDefaults(void) {
     _sections = @[
         @[@[@"BTTV Emotes", FMBTTVEnabledKey], @[@"FFZ Emotes", FMFFZEnabledKey], @[@"7TV Emotes", FMSevenTVEnabledKey]],
         @[@[@"Keep Deleted Messages", FMKeepDeletedMessagesKey]],
+        @[@[@"Chat History", FMChatHistoryKey]],
         @[@[@"Claim Channel Points Bonus", FMClaimChannelPointsKey]],
         @[@[@"Debug Log", FMDebugLogKey], @[@"View Log"]],
     ];
@@ -65,6 +68,8 @@ void FMRegisterDefaults(void) {
     if(section == 1)
         return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed. Chat also stays when a moderator clears it.";
     if(section == 2)
+        return @"Fills chat with up to 150 earlier messages when you open a stream, from recent-messages.robotty.de, which is sent the channel's name. Not on vertical streams.";
+    if(section == 3)
         return @"Claims the bonus chest as soon as it shows up, in any chat you have open.";
     return @"Records emote loads, requests and channel points claims to a file you can share when something goes wrong.\n\n"
            @"Emote and deleted message changes apply after restarting Twitch.\n\nFreemote " FREEMOTE_VERSION;
