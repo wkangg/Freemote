@@ -137,9 +137,15 @@ jobs:
 
       - name: Rename IPA
         id: ipa_name
+        env:
+          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
+          COMMIT: ${{ steps.package_info.outputs.commit }}
         run: |
+          # The version comes from the downloaded IPA, so it's passed in rather than pasted into the script, and only
+          # version characters are kept
+          version=$(printf '%s' "$APP_VERSION" | tr -cd '0-9A-Za-z._-')
           # e.g. Freemote_32.1-eab3452, rather than the package ID
-          name="$(grep "^Name:" control | cut -d' ' -f2)_${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.commit }}"
+          name="$(grep "^Name:" control | cut -d' ' -f2)_${version}-${COMMIT}"
           mv -f packages/*.ipa "packages/$name.ipa"
           echo "name=$name" >> $GITHUB_OUTPUT
 
