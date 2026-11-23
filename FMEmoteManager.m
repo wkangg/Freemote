@@ -79,7 +79,7 @@
             return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
         });
     // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
-    __block NSDictionary *ffzGlobalSets, *ffzRoom;
+    __block id ffzGlobalSets, ffzRoom;
     dispatch_group_t sizeGroup = dispatch_group_create();
     if(needsGlobals && ffz)
         dispatch_group_async(sizeGroup, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
@@ -162,7 +162,7 @@
 
 // FFZ API response: {sets: {<set ID>: {emoticons: [{id, width, height, ...}]}}}. Sets the aspect ratio of the FFZ
 // emotes with the same ID in the registry.
-- (void)addFFZSizes:(NSDictionary *)ffzInfo toRegistry:(NSDictionary<NSString *, FMEmote *> *)registry {
+- (void)addFFZSizes:(id)ffzInfo toRegistry:(NSDictionary<NSString *, FMEmote *> *)registry {
     NSDictionary *sets = [ffzInfo isKindOfClass:[NSDictionary class]] ? ffzInfo[@"sets"] : nil;
     if(![sets isKindOfClass:[NSDictionary class]])
         return;
