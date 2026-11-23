@@ -70,7 +70,6 @@ jobs:
       - name: Get package info
         id: package_info
         run: |
-          echo "id=$(grep "^Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
           echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
