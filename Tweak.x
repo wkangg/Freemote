@@ -273,16 +273,23 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
     });
 }
 
+// Blocks until load calls its completion, or FMHistoryEmoteTimeout. what: e.g. "VOD chat for video 123", for the log.
+static void waitForLoad(NSString *what, void (^load)(dispatch_block_t completion)) {
+    FMLog("%@ is waiting for its emotes", what);
+    dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+    load(^{
+        dispatch_semaphore_signal(loaded);
+    });
+    if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
+        FMLog("%@ timed out loading its emotes", what);
+}
+
 // Whatever's in by the timeout: the providers that answered, or globals at least
 static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("Chat history for channel %@ is waiting for its emotes", channelID);
-        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
-        loadChannelEmotes(channelID, ^{
-            dispatch_semaphore_signal(loaded);
+        waitForLoad([NSString stringWithFormat:@"Chat history for channel %@", channelID], ^(dispatch_block_t completion) {
+            loadChannelEmotes(channelID, completion);
         });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for channel %@ chat history", channelID);
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
 }
@@ -290,13 +297,9 @@ static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *chann
 static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID) {
     NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
     if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("VOD chat for video %@ is waiting for its emotes", videoID);
-        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
-        loadVideoEmotes(videoID, ^{
-            dispatch_semaphore_signal(loaded);
+        waitForLoad([NSString stringWithFormat:@"VOD chat for video %@", videoID], ^(dispatch_block_t completion) {
+            loadVideoEmotes(videoID, completion);
         });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for video %@ chat", videoID);
         channelID = [channelIDsByVideoID objectForKey:videoID];
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
