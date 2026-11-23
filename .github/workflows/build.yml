@@ -108,8 +108,8 @@ jobs:
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          # The IPA is untrusted: only version characters are kept, so the version can't add lines to the outputs, move
-          # the renamed IPA out of packages/, or break the release tag
+          # The IPA is untrusted: only version characters are kept, so the version can't add lines to the outputs or move
+          # the renamed IPA out of packages/
           echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()" | tr -cd '0-9A-Za-z._-')" >> $GITHUB_OUTPUT
 
       - name: Theos cache key
