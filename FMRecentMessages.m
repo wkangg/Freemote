@@ -1,13 +1,10 @@
 #import "FMRecentMessages.h"
 #import "FMLog.h"
+#import "FMUtilities.h"
 
 // More than the chat holds: deleted messages are among them, and are left out unless they're kept
 #define FMRecentMessagesRequestLimit 250
 #define FMRecentMessagesRequestTimeout 5
-
-static BOOL isNull(id value) {
-    return !value || value == [NSNull null];
-}
 
 // An IRC tag's value: "\s" is a space, "\:" a semicolon
 static NSString *unescapedTagValue(NSString *value) {
@@ -92,16 +89,10 @@ static NSMutableArray *fragmentsFromText(NSString *text, NSString *emotesTag) {
 
     // [from, to, emote ID]
     NSMutableArray<NSArray *> *emotes = [[NSMutableArray alloc] init];
-    for(NSString *emote in [emotesTag componentsSeparatedByString:@"/"]) {
-        NSRange colon = [emote rangeOfString:@":"];
-        if(colon.location == NSNotFound || colon.location == 0)
-            continue;
-        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
-            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
-            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue && (NSUInteger)ends[1].integerValue < length)
-                [emotes addObject:@[@(ends[0].integerValue), @(ends[1].integerValue), [emote substringToIndex:colon.location]]];
-        }
-    }
+    FMEnumerateIRCEmotes(emotesTag, ^(NSString *emoteID, NSUInteger from, NSUInteger to) {
+        if(to < length)
+            [emotes addObject:@[@(from), @(to), emoteID]];
+    });
     [emotes sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
         return [(NSNumber *)a[0] compare:b[0]];
     }];
@@ -127,9 +118,11 @@ static NSDictionary *user(NSString *userID, NSString *login, NSString *displayNa
     return @{@"__typename": @"User", @"id": userID, @"login": login, @"displayName": displayName.length ? displayName : login};
 }
 
+// One IRC line (as the service returns them) as a recentChatMessages message, or nil if it isn't a chat message.
+// deleted: whether the service says it was deleted.
 // "@<tags> :<login>!<login>@<login>.tmi.twitch.tv PRIVMSG #<channel> :<text>". The service leaves the ":" off a text
 // of one word.
-NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted) {
+static NSMutableDictionary *chatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted) {
     NSRange tagsEnd = [line isKindOfClass:[NSString class]] ? [line rangeOfString:@" "] : (NSRange){NSNotFound, 0};
     if(tagsEnd.location == NSNotFound || ![line hasPrefix:@"@"])
         return nil;
@@ -150,9 +143,7 @@ NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *delet
     NSString *text = [rest substringFromIndex:words[0].length + words[1].length + words[2].length + 3];
     if([text hasPrefix:@":"])
         text = [text substringFromIndex:1];
-    // /me: the emotes tag counts from the start of the action's text
-    if([text hasPrefix:@"\x01" "ACTION "])
-        text = [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+    text = FMIRCActionText(text);
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
 
     NSMutableArray *badges = [[NSMutableArray alloc] init];
@@ -210,7 +201,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         NSDate *date = [messageID isKindOfClass:[NSString class]] ? dateFromSentAt(message[@"sentAt"]) : nil;
         if(!date)
             return nil;
-        BOOL deleted = !isNull(message[@"deletedAt"]);
+        BOOL deleted = !FMIsNull(message[@"deletedAt"]);
         if(deleted && deletedIDs) {
             // The service's copy is sure to have its text
             if([recentIDs containsObject:messageID]) {
@@ -298,7 +289,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         NSMutableSet<NSString *> *deletedIDs = [[NSMutableSet alloc] init];
         for(NSString *line in lines) {
             BOOL deleted = NO;
-            NSMutableDictionary *message = FMChatHistoryMessageFromIRCLine(line, &deleted);
+            NSMutableDictionary *message = chatHistoryMessageFromIRCLine(line, &deleted);
             if(!message)
                 continue;
             [messages addObject:message];
@@ -309,7 +300,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         self.messages = messages;
         // error_code: e.g. channel_not_joined the first time anyone asks for a channel, with no messages yet
         FMLog("Recent messages for %@: %lu chat messages (%lu deleted) in %lu lines in %.1fs (%@)", _channelLogin, (unsigned long)messages.count, (unsigned long)deletedIDs.count, (unsigned long)lines.count, duration,
-              isNull(json[@"error_code"]) ? @"no error" : json[@"error_code"]);
+              FMIsNull(json[@"error_code"]) ? @"no error" : json[@"error_code"]);
     }
     self.done = YES;
     dispatch_group_leave(_request);

@@ -1,4 +1,3 @@
-#import <UIKit/UIKit.h>
 #import "Tweak.h"
 #import "FMChannelPoints.h"
 #import "FMEmoteManager.h"
@@ -6,10 +5,10 @@
 #import "FMReactNativePatch.h"
 #import "FMRecentMessages.h"
 #import "FMSettings.h"
+#import "FMUtilities.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
-
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"
@@ -107,13 +106,14 @@ static NSString *codePointsOf(NSString *word) {
 }
 
 // For finding other characters that keep a word from matching: logs words that are an emote name once everything but
-// letters and digits is taken out
+// letters and digits is taken out. Only the first few, and words aren't looked at after that.
 static void logNearMiss(NSString *word, NSDictionary<NSString *, FMEmote *> *nameRegistry) {
-    if([word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
+    static atomic_int logged;
+    if(atomic_load(&logged) >= 10 || [word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
         return;
     NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
-    if(stripped.length && nameRegistry[stripped])
-        FMLogFirst(10, "Word looks like emote %@ but doesn't match: %@", stripped, codePointsOf(word));
+    if(stripped.length && nameRegistry[stripped] && atomic_fetch_add(&logged, 1) < 10)
+        FMLog("Word looks like emote %@ but doesn't match: %@", stripped, codePointsOf(word));
 }
 
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
@@ -238,11 +238,6 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
     return imageURL ?: url;
 }
 
-static BOOL isChannelID(NSString *channelID) {
-    return [channelID isKindOfClass:[NSString class]] && channelID.length
-        && [channelID rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location == NSNotFound;
-}
-
 // Only on emoteQueue
 static void loadChannelEmotesNow(NSString *channelID) {
     if([emoteManager hasEmotesForChannel:channelID])
@@ -266,26 +261,33 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
         NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
         if(!channelID) {
             channelID = [emoteManager.httpClient ownerIDForVideoID:videoID];
-            if(isChannelID(channelID))
+            if(FMIsChannelID(channelID))
                 [channelIDsByVideoID setObject:channelID forKey:videoID];
         }
-        if(isChannelID(channelID))
+        if(FMIsChannelID(channelID))
             loadChannelEmotesNow(channelID);
         if(completion)
             completion();
     });
 }
 
+// Blocks until load calls its completion, or FMHistoryEmoteTimeout. what: e.g. "VOD chat for video 123", for the log.
+static void waitForLoad(NSString *what, void (^load)(dispatch_block_t completion)) {
+    FMLog("%@ is waiting for its emotes", what);
+    dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+    load(^{
+        dispatch_semaphore_signal(loaded);
+    });
+    if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
+        FMLog("%@ timed out loading its emotes", what);
+}
+
 // Whatever's in by the timeout: the providers that answered, or globals at least
 static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *channelID) {
     if(![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("Chat history for channel %@ is waiting for its emotes", channelID);
-        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
-        loadChannelEmotes(channelID, ^{
-            dispatch_semaphore_signal(loaded);
+        waitForLoad([NSString stringWithFormat:@"Chat history for channel %@", channelID], ^(dispatch_block_t completion) {
+            loadChannelEmotes(channelID, completion);
         });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for channel %@ chat history", channelID);
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
 }
@@ -293,13 +295,9 @@ static NSDictionary<NSString *, FMEmote *> *waitForChannelEmotes(NSString *chann
 static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID) {
     NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
     if(!channelID || ![emoteManager hasEmotesForChannel:channelID]) {
-        FMLog("VOD chat for video %@ is waiting for its emotes", videoID);
-        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
-        loadVideoEmotes(videoID, ^{
-            dispatch_semaphore_signal(loaded);
+        waitForLoad([NSString stringWithFormat:@"VOD chat for video %@", videoID], ^(dispatch_block_t completion) {
+            loadVideoEmotes(videoID, completion);
         });
-        if(dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, FMHistoryEmoteTimeout * NSEC_PER_SEC)))
-            FMLog("Timed out loading emotes for video %@ chat", videoID);
         channelID = [channelIDsByVideoID objectForKey:videoID];
     }
     return [emoteManager emoteNameRegistryForChannel:channelID];
@@ -311,13 +309,31 @@ static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID
 // KMPMobileChat
 static NSSet<NSString *> *chatHistoryOperations;
 
-// The GQL operations in a request: its body is one operation or a batch of them
+static char gqlOperationsKey;
+
+// The GQL operations in a request: its body is one operation or a batch of them. A request is looked at by several
+// checks, so an immutable one keeps them rather than having its body parsed each time.
 static NSArray *gqlOperations(NSURLRequest *request) {
     if(![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody)
         return @[];
+    BOOL immutable = ![request isKindOfClass:[NSMutableURLRequest class]];
+    NSArray *operations = immutable ? objc_getAssociatedObject(request, &gqlOperationsKey) : nil;
+    if(operations)
+        return operations;
 
     id json = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
-    return [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}];
+    operations = [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}];
+    if(immutable)
+        objc_setAssociatedObject(request, &gqlOperationsKey, operations, OBJC_ASSOCIATION_RETAIN);
+    return operations;
+}
+
+// Calls the block with each operation in the request and its response: one, or a batch of them
+static void enumerateGQLResponses(id json, NSURLRequest *request, void (^block)(NSDictionary *operation, id response)) {
+    NSArray *operations = gqlOperations(request);
+    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
+    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++)
+        block(operations[i], responses[i]);
 }
 
 // The variables of each chat history operation in the request
@@ -337,7 +353,7 @@ static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL
 // VOD comment queries only have the video ID (numeric, like channel IDs)
 static NSString *chatHistoryVideoID(NSURLRequest *request) {
     for(NSDictionary *variables in chatHistoryVariables(request, NO)) {
-        if(isChannelID(variables[@"videoID"]))
+        if(FMIsChannelID(variables[@"videoID"]))
             return variables[@"videoID"];
     }
     return nil;
@@ -347,9 +363,9 @@ static BOOL isChatHistoryRequest(NSURLRequest *request) {
     NSArray<NSDictionary *> *variablesList = chatHistoryVariables(request, YES);
     // Start on the emotes now so the response doesn't have to wait as long
     for(NSDictionary *variables in variablesList) {
-        if(isChannelID(variables[@"channelID"]))
+        if(FMIsChannelID(variables[@"channelID"]))
             loadChannelEmotes(variables[@"channelID"], nil);
-        if(isChannelID(variables[@"videoID"]))
+        if(FMIsChannelID(variables[@"videoID"]))
             loadVideoEmotes(variables[@"videoID"], nil);
     }
     return variablesList.count > 0;
@@ -392,7 +408,7 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
         return;
 
     NSArray *messages = json[@"recentChatMessages"];
-    if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
+    if([messages isKindOfClass:[NSArray class]] && FMIsChannelID(json[@"id"])) {
         // Otherwise whatever's in so far (globals at least, once they're in)
         NSDictionary<NSString *, FMEmote *> *nameRegistry = waitForEmotes ? waitForChannelEmotes(json[@"id"]) : [emoteManager emoteNameRegistryForChannel:json[@"id"]];
         BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
@@ -428,10 +444,6 @@ static NSUInteger codePointCount(NSString *text) {
     return [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4;
 }
 
-static BOOL isNull(id value) {
-    return !value || value == [NSNull null];
-}
-
 // Marks that join onto the character before them, like U+034F, which chatters add to get around the duplicate message
 // check. After a space or an emote they'd glue the two into one composed sequence for anything that splits by those,
 // so they're taken out there: they're invisible anyway.
@@ -465,7 +477,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
         }
         NSUInteger length = codePointCount(text);
         NSDictionary *emote = fragment[@"emote"];
-        if(!isNull(emote) || !isNull(fragment[@"mention"])) {
+        if(!FMIsNull(emote) || !FMIsNull(fragment[@"mention"])) {
             // Twitch's emotes move up by whatever was taken out before them (their ID has the position too)
             if([emote isKindOfClass:[NSDictionary class]] && length && ![emote[@"from"] isEqual:@(offset)]) {
                 NSMutableDictionary *movedEmote = [emote mutableCopy];
@@ -479,7 +491,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             }
             [newFragments addObject:fragment];
             offset += length;
-            afterEmote = !isNull(emote);
+            afterEmote = !FMIsNull(emote);
             continue;
         }
 
@@ -517,7 +529,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
 
     // Real messages never end in whitespace, and taking the marks out can leave some (in "LOL \u034f")
     NSDictionary *last = newFragments.lastObject;
-    if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && isNull(last[@"emote"]) && isNull(last[@"mention"])) {
+    if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && FMIsNull(last[@"emote"]) && FMIsNull(last[@"mention"])) {
         NSString *lastText = last[@"text"];
         NSRange end = [lastText rangeOfCharacterFromSet:[NSCharacterSet whitespaceCharacterSet].invertedSet options:NSBackwardsSearch];
         NSUInteger keep = end.location == NSNotFound ? 0 : NSMaxRange(end);
@@ -607,13 +619,10 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
 // Twitch doesn't know our emotes, so their cards get a made-up emote instead: a global one with no owner, which the
 // card shows with just the image and name. The image goes through the URL rewrite like in chat.
 static void addEmoteCards(id json, NSURLRequest *request) {
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        FMEmote *emote = emoteCardEmoteFor(operations[i]);
-        NSMutableDictionary *response = responses[i];
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        FMEmote *emote = emoteCardEmoteFor(operation);
         if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
-            continue;
+            return;
         // Its own ID (the image rewrite ignores anything after the emote ID): Apollo caches emotes by ID, and the
         // emote picker's copy of this emote (no type) mustn't turn into a GLOBALS one, or the other way around
         response[@"data"] = @{@"emote": @{
@@ -622,7 +631,7 @@ static void addEmoteCards(id json, NSURLRequest *request) {
         }};
         [response removeObjectForKey:@"errors"];
         FMLog("Answered the emote card for %@", emote.emoteText);
-    }
+    });
 }
 
 #pragma mark - Emote picker
@@ -639,7 +648,7 @@ static NSString *emoteSetsChannelIDFor(NSDictionary *operation) {
         return nil;
     NSDictionary *variables = operation[@"variables"];
     NSString *channelID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"channelID"] : nil;
-    return isChannelID(channelID) ? channelID : nil;
+    return FMIsChannelID(channelID) ? channelID : nil;
 }
 
 static NSString *emoteSetsChannelID(NSURLRequest *request) {
@@ -725,25 +734,26 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
         @{@"login": @"betterttv", @"displayName": @"BetterTTV", @"profileImageURL": @"https://betterttv.com/favicon.png"},
         @{@"login": @"frankerfacez", @"displayName": @"FrankerFaceZ", @"profileImageURL": @"https://www.frankerfacez.com/static/images/favicon-96.png"},
     ];
-    NSArray<NSMutableArray<NSString *> *> *names = @[[NSMutableArray array], [NSMutableArray array], [NSMutableArray array]];
+    // Provider name -> its emotes' names
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *namesByProvider = [[NSMutableDictionary alloc] init];
+    for(NSDictionary *provider in providers)
+        namesByProvider[provider[@"displayName"]] = [NSMutableArray array];
     NSDictionary<NSString *, FMEmote *> *nameRegistry = [emoteManager emoteNameRegistryForChannel:channelID];
     [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, FMEmote *emote, BOOL *stop) {
-        EmoteType type = emote.emoteType;
-        [names[type == SevenTV || type == SevenTVGlobal ? 0 : type == BTTV || type == BTTVGlobal ? 1 : 2] addObject:name];
+        [namesByProvider[emote.providerName] addObject:name];
     }];
 
     NSMutableArray<NSDictionary *> *sets = [[NSMutableArray alloc] init];
     NSMutableArray<NSString *> *counts = [[NSMutableArray alloc] init];
     for(NSUInteger i = 0; i < providers.count; i++) {
-        [names[i] sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-            EmoteType typeA = nameRegistry[a].emoteType, typeB = nameRegistry[b].emoteType;
-            BOOL globalA = typeA == BTTVGlobal || typeA == FFZGlobal || typeA == SevenTVGlobal;
-            BOOL globalB = typeB == BTTVGlobal || typeB == FFZGlobal || typeB == SevenTVGlobal;
+        NSMutableArray<NSString *> *names = namesByProvider[providers[i][@"displayName"]];
+        [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+            BOOL globalA = nameRegistry[a].isGlobal, globalB = nameRegistry[b].isGlobal;
             if(globalA != globalB)
                 return globalA ? NSOrderedDescending : NSOrderedAscending;
             return [a localizedCaseInsensitiveCompare:b];
         }];
-        if(!names[i].count) {
+        if(!names.count) {
             [counts addObject:[NSString stringWithFormat:@"%@ 0", providers[i][@"displayName"]]];
             continue;
         }
@@ -754,7 +764,7 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
         // A 7TV channel can add a global under an alias: one ID under two names. Apollo would merge the two into one
         // cached emote and the picker would drop one, so only the first (the channel's name) goes in.
         NSMutableSet<NSString *> *addedIDs = [[NSMutableSet alloc] init];
-        for(NSString *name in names[i]) {
+        for(NSString *name in names) {
             FMEmote *emote = nameRegistry[name];
             if([addedIDs containsObject:emote.emoteID])
                 continue;
@@ -776,27 +786,22 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
 }
 
 static void addEmotePickerSets(id json, NSURLRequest *request) {
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        NSString *channelID = emoteSetsChannelIDFor(operations[i]);
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        NSString *channelID = emoteSetsChannelIDFor(operation);
         if(!channelID)
-            continue;
-        NSDictionary *response = responses[i];
-        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
-        NSDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
-        NSMutableDictionary *channelSelf = [channel isKindOfClass:[NSDictionary class]] ? channel[@"self"] : nil;
+            return;
+        NSMutableDictionary *channelSelf = FMValueAtPath(response, @[@"data", @"channel", @"self"]);
         NSArray *sets = [channelSelf isKindOfClass:[NSMutableDictionary class]] ? channelSelf[@"availableEmoteSets"] : nil;
         if(![sets isKindOfClass:[NSArray class]]) {
             // Logged out (no self), or the response shape changed
             FMLog("ChatEmoteSets for channel %@ has no availableEmoteSets, the emote picker stays as is", channelID);
-            continue;
+            return;
         }
         NSString *summary;
         NSArray<NSDictionary *> *newSets = emotePickerSets(channelID, &summary);
         channelSelf[@"availableEmoteSets"] = [sets arrayByAddingObjectsFromArray:newSets];
         FMLog("Emote picker for channel %@: added %@ emotes (%s)", channelID, summary, [emoteManager hasEmotesForChannel:channelID] ? "all loaded" : "still loading");
-    }
+    });
 }
 
 static id swiftIvar(id object, const char *name) {
@@ -1203,17 +1208,13 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
     if(!recent)
         return;
     BOOL late = !recent.done;
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operations[i])])
-            continue;
-        NSDictionary *response = responses[i];
-        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
-        NSMutableDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operation)])
+            return;
+        NSMutableDictionary *channel = FMValueAtPath(response, @[@"data", @"channel"]);
         if(![channel isKindOfClass:[NSMutableDictionary class]]) {
             FMLog("ChatHistory for %@ has no channel, its chat history stays as is", recent.channelLogin);
-            continue;
+            return;
         }
         NSArray *messages = [channel[@"recentChatMessages"] isKindOfClass:[NSArray class]] ? channel[@"recentChatMessages"] : @[];
         if(late) {
@@ -1221,22 +1222,22 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             NSData *messagesData = [NSJSONSerialization dataWithJSONObject:messages options:0 error:nil];
             NSArray *twitchMessages = messagesData ? [NSJSONSerialization JSONObjectWithData:messagesData options:NSJSONReadingMutableContainers error:nil] : nil;
             NSString *channelID = channel[@"id"];
-            if(![twitchMessages isKindOfClass:[NSArray class]] || !isChannelID(channelID)) {
+            if(![twitchMessages isKindOfClass:[NSArray class]] || !FMIsChannelID(channelID)) {
                 FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
-                continue;
+                return;
             }
             FMLog("Recent messages for %@ didn't come in time, they'll be added when they do", recent.channelLogin);
             [recent whenDone:^{
                 addLateRecentMessages(recent, twitchMessages, channelID);
             }];
-            continue;
+            return;
         }
         NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
         NSArray *merged = FMMergeChatHistory(messages, recent, deletedIDs);
         if(!merged) {
             // The response shape changed
             FMLog("ChatHistory for %@ has a message without an ID or time, its chat history stays as is", recent.channelLogin);
-            continue;
+            return;
         }
         channel[@"recentChatMessages"] = merged;
         // Before the response is handed over, so the rows know by the time they're drawn
@@ -1244,7 +1245,7 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             sendDeletedHistoryMessages(deletedIDs);
         FMLog("Chat history for %@: %lu messages from Twitch and %lu recent messages make %lu (%lu deleted, %s)", recent.channelLogin,
               (unsigned long)messages.count, (unsigned long)recent.messages.count, (unsigned long)merged.count, (unsigned long)deletedIDs.count, deletedIDs ? "kept" : "left out");
-    }
+    });
 }
 
 #pragma mark - Held back responses
@@ -1442,16 +1443,9 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 // The positions the message's emotes tag already covers
 static NSIndexSet *ircEmotePositions(NSString *emotes) {
     NSMutableIndexSet *positions = [[NSMutableIndexSet alloc] init];
-    for(NSString *emote in [emotes componentsSeparatedByString:@"/"]) {
-        NSRange colon = [emote rangeOfString:@":"];
-        if(colon.location == NSNotFound)
-            continue;
-        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
-            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
-            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue)
-                [positions addIndexesInRange:NSMakeRange(ends[0].integerValue, ends[1].integerValue - ends[0].integerValue + 1)];
-        }
-    }
+    FMEnumerateIRCEmotes(emotes, ^(NSString *emoteID, NSUInteger from, NSUInteger to) {
+        [positions addIndexesInRange:NSMakeRange(from, to - from + 1)];
+    });
     return positions;
 }
 
@@ -1490,11 +1484,11 @@ static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, FMEmo
 static NSString *durationText(long long seconds) {
     long long sizes[] = {86400, 3600, 60, 1};
     NSString *units[] = {@"day", @"hour", @"minute", @"second"};
-    for(int i = 0; i < 4; i++) {
-        if(seconds % sizes[i] == 0)
-            return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
-    }
-    return nil;
+    int i = 0;
+    // Any number of seconds is a whole number of the last unit
+    while(seconds % sizes[i])
+        i++;
+    return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
 }
 
 // Channels ("#name") where you're a moderator or the broadcaster, from your USERSTATE there. @synchronized
@@ -1567,7 +1561,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
             emotesIndex = i;
         }
     }
-    if(!isChannelID(channelID))
+    if(!FMIsChannelID(channelID))
         return line;
     if(![emoteManager hasEmotesForChannel:channelID]) {
         if([command isEqualToString:@"ROOMSTATE"])
@@ -1587,9 +1581,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
     if(textStart.location == NSNotFound)
         return line;
     NSString *text = [rest substringFromIndex:NSMaxRange(textStart)];
-    // /me: positions are in the action's text
-    if([text hasPrefix:@"\x01" "ACTION "])
-        text = [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+    text = FMIRCActionText(text);
 
     NSUInteger emoteCount = 0;
     NSString *ourEmotes = ircEmotesForText(text, [emoteManager emoteNameRegistryForChannel:channelID], ircEmotePositions(emotes), &emoteCount);
@@ -1881,7 +1873,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         return event;
     if(![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
         return event;
-    if(MessageDeleted && [event isKindOfClass:MessageDeleted]) {
+    if([event isKindOfClass:MessageDeleted]) {
         KMPMCChannelEventChatChannelMessageDeleted *deleted = event;
         NSString *messageID = deleted.messageId;
         if(![messageID isKindOfClass:[NSString class]] || !messageID.length)
@@ -1892,7 +1884,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         refreshDeletedMessages();
         return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:deleted.senderLoginName deletedMessageContent:deleted.deletedMessageContent];
     }
-    if(UserMessagesCleared && [event isKindOfClass:UserMessagesCleared]) {
+    if([event isKindOfClass:UserMessagesCleared]) {
         NSString *userID = ((KMPMCChannelEventChatChannelUserMessagesCleared *)event).clearUserId;
         if(![userID isKindOfClass:[NSString class]] || !userID.length)
             return event;
@@ -1913,7 +1905,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         refreshDeletedMessages();
         return [[UserMessagesCleared alloc] initWithClearUserId:@""];
     }
-    if(MessagesCleared && [event isKindOfClass:MessagesCleared]) {
+    if([event isKindOfClass:MessagesCleared]) {
         FMLogFirst(1, "Kept native chat through a /clear");
         return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:nil deletedMessageContent:nil];
     }
@@ -2069,7 +2061,7 @@ static void dimIfDeleted(MessageStringView *view) {
     if(!channelID) {
         NSDictionary *tags = self.messageTags;
         NSString *roomID = [tags isKindOfClass:[NSDictionary class]] ? tags[@"room-id"] : nil;
-        if(isChannelID(roomID))
+        if(FMIsChannelID(roomID))
             channelID = roomID;
     }
     if(!channelID)
@@ -2105,7 +2097,7 @@ static void joinedChannel(id channelID);
 
 - (id)joinChannelName:(NSString *)channelName channelId:(NSString *)channelID {
     NSString *key = channelKey(channelName);
-    if(key && isChannelID(channelID)) {
+    if(key && FMIsChannelID(channelID)) {
         @synchronized(channelIDsByName) {
             channelIDsByName[key] = channelID;
         }
@@ -2116,7 +2108,7 @@ static void joinedChannel(id channelID);
         FMLog("Joining chat %@ without a channel ID", key);
         dispatch_async(emoteQueue, ^{
             NSString *lookedUpID = [emoteManager.httpClient channelIDForLogin:key];
-            if(!isChannelID(lookedUpID))
+            if(!FMIsChannelID(lookedUpID))
                 return;
             @synchronized(channelIDsByName) {
                 channelIDsByName[key] = lookedUpID;
@@ -2256,7 +2248,7 @@ static void joinedChannel(id channelID) {
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
     FMLog("Joined channel %@", channel);
-    if(isChannelID(channel)) {
+    if(FMIsChannelID(channel)) {
         loadChannelEmotes(channel, nil);
         FMChannelPointsCheckChannel(channel);
     }

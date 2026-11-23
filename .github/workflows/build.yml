@@ -13,10 +13,17 @@ on:
         default: false
         type: boolean
 
+# Read-only unless a job needs more, so the token doesn't depend on the repo's default
+permissions:
+  contents: read
+
 jobs:
   deb:
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-24.04
+    concurrency:
+      group: deb-${{ github.ref }}
+      cancel-in-progress: true
 
     steps:
       - uses: actions/checkout@v7
@@ -24,9 +31,8 @@ jobs:
       - name: Get package info
         id: package_info
         run: |
-          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          # Must match PACKAGE_VERSION in the Makefile
-          echo "version=$(grep "Version:" control | cut -d' ' -f2)+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "id=$(grep "^Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Theos cache key
         run: echo "theos_heads=$(git ls-remote https://github.com/theos/theos HEAD | cut -f 1)-$(git ls-remote https://github.com/theos/sdks HEAD | cut -f 1)" >> $GITHUB_ENV
@@ -54,23 +60,28 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
+          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.commit }}
           path: packages/*.deb
           if-no-files-found: error
 
   ipa:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
+    permissions:
+      # Create release
+      contents: write
 
     steps:
+      # This job's token can write, and it runs theos-jailed's install script, so the checkouts don't leave the token in
+      # git config. Nothing here pushes.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Get package info
         id: package_info
         run: |
-          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          # Must match PACKAGE_VERSION in the Makefile
-          echo "version=$(grep "Version:" control | cut -d' ' -f2)+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: |
@@ -97,8 +108,9 @@ jobs:
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
-          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          # The IPA is untrusted: only version characters are kept, so the version can't add lines to the outputs or move
+          # the renamed IPA out of packages/
+          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()" | tr -cd '0-9A-Za-z._-')" >> $GITHUB_OUTPUT
 
       - name: Theos cache key
         run: echo "theos_heads=$(git ls-remote https://github.com/theos/theos HEAD | cut -f 1)-$(git ls-remote https://github.com/theos/sdks HEAD | cut -f 1)" >> $GITHUB_ENV
@@ -118,6 +130,7 @@ jobs:
           repository: level3tjg/theos-jailed
           path: theos-jailed
           submodules: recursive
+          persist-credentials: false
 
       - name: Install theos-jailed
         run: |
@@ -134,10 +147,22 @@ jobs:
           COMPRESSION: 6
           IPA: ${{ github.workspace }}/App.ipa
 
+      - name: Rename IPA
+        id: ipa_name
+        env:
+          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
+          COMMIT: ${{ steps.package_info.outputs.commit }}
+        run: |
+          # The version comes from the downloaded IPA, so it's passed in rather than pasted into the script
+          # e.g. Freemote_32.1-eab3452, rather than the package ID
+          name="$(grep "^Name:" control | cut -d' ' -f2)_${APP_VERSION}-${COMMIT}"
+          mv -f packages/*.ipa "packages/$name.ipa"
+          echo "name=$name" >> $GITHUB_OUTPUT
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
+          name: ${{ steps.ipa_name.outputs.name }}
           path: packages/*.ipa
           if-no-files-found: error
 
@@ -147,4 +172,6 @@ jobs:
         with:
           draft: true
           files: packages/*.ipa
-          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
+          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.commit }}
+          # The commit that was built, not the default branch when the draft is published
+          target_commitish: ${{ github.sha }}

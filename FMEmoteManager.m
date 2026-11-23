@@ -5,6 +5,8 @@
 @interface FMEmoteManager ()
 // Channels whose requests have all finished. Their emotes are published as each request finishes, before this.
 @property (atomic, copy) NSSet<NSString *> *loadedChannelIDs;
+// Replaced wholesale on update, like the public registries
+@property (atomic, copy) NSDictionary<NSString *, FMEmote *> *globalNameRegistry;
 @end
 
 @implementation FMEmoteManager
@@ -58,12 +60,12 @@
         fetch(globalLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzGlobalEmotes] type:FFZGlobal]; });
     if(needsGlobals && sevenTV)
         fetch(globalLists, 2, ^NSArray *{
-            NSDictionary *info = [httpClient sevenTVGlobalEmotes];
+            id info = [httpClient sevenTVGlobalEmotes];
             return [self emotesFromInfo:[info isKindOfClass:[NSDictionary class]] ? info[@"emotes"] : nil type:SevenTVGlobal];
         });
     if(bttv)
         fetch(channelLists, 0, ^NSArray *{
-            NSDictionary *info = [httpClient bttvEmoteInformationForChannelID:channelID];
+            id info = [httpClient bttvEmoteInformationForChannelID:channelID];
             if(![info isKindOfClass:[NSDictionary class]])
                 return @[];
             return [[self emotesFromInfo:info[@"channelEmotes"] type:BTTV] arrayByAddingObjectsFromArray:[self emotesFromInfo:info[@"sharedEmotes"] type:BTTV]];
@@ -72,12 +74,12 @@
         fetch(channelLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzEmoteInformationForChannelID:channelID] type:FFZ]; });
     if(sevenTV)
         fetch(channelLists, 2, ^NSArray *{
-            NSDictionary *info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
+            id info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
             id emoteSet = [info isKindOfClass:[NSDictionary class]] ? info[@"emote_set"] : nil;
             return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
         });
     // FFZ's own API is often several seconds slower and only adds sizes, so it isn't allowed to hold up the emotes
-    __block NSDictionary *ffzGlobalSets, *ffzRoom;
+    __block id ffzGlobalSets, ffzRoom;
     dispatch_group_t sizeGroup = dispatch_group_create();
     if(needsGlobals && ffz)
         dispatch_group_async(sizeGroup, queue, ^{ ffzGlobalSets = [httpClient ffzGlobalSets]; });
@@ -160,7 +162,7 @@
 
 // FFZ API response: {sets: {<set ID>: {emoticons: [{id, width, height, ...}]}}}. Sets the aspect ratio of the FFZ
 // emotes with the same ID in the registry.
-- (void)addFFZSizes:(NSDictionary *)ffzInfo toRegistry:(NSDictionary<NSString *, FMEmote *> *)registry {
+- (void)addFFZSizes:(id)ffzInfo toRegistry:(NSDictionary<NSString *, FMEmote *> *)registry {
     NSDictionary *sets = [ffzInfo isKindOfClass:[NSDictionary class]] ? ffzInfo[@"sets"] : nil;
     if(![sets isKindOfClass:[NSDictionary class]])
         return;
@@ -187,15 +189,8 @@
 }
 
 - (NSURL *)imageURLForEmoteID:(NSString *)emoteID {
-
     FMEmote *emote = self.emoteRegistry[emoteID];
-    if(emote) {
-        if(emote.image2x)
-            return emote.image2x;
-        else if(emote.image1x)
-            return emote.image1x;
-    }
-    return nil;
+    return emote.image2x ?: emote.image1x;
 }
 
 @end
