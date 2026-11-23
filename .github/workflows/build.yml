@@ -97,8 +97,9 @@ jobs:
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
-          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          # The IPA is untrusted: only version characters are kept, so the version can't add lines to the outputs, move
+          # the renamed IPA out of packages/, or break the release tag
+          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()" | tr -cd '0-9A-Za-z._-')" >> $GITHUB_OUTPUT
 
       - name: Theos cache key
         run: echo "theos_heads=$(git ls-remote https://github.com/theos/theos HEAD | cut -f 1)-$(git ls-remote https://github.com/theos/sdks HEAD | cut -f 1)" >> $GITHUB_ENV
@@ -140,11 +141,9 @@ jobs:
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
           COMMIT: ${{ steps.package_info.outputs.commit }}
         run: |
-          # The version comes from the downloaded IPA, so it's passed in rather than pasted into the script, and only
-          # version characters are kept
-          version=$(printf '%s' "$APP_VERSION" | tr -cd '0-9A-Za-z._-')
+          # The version comes from the downloaded IPA, so it's passed in rather than pasted into the script
           # e.g. Freemote_32.1-eab3452, rather than the package ID
-          name="$(grep "^Name:" control | cut -d' ' -f2)_${version}-${COMMIT}"
+          name="$(grep "^Name:" control | cut -d' ' -f2)_${APP_VERSION}-${COMMIT}"
           mv -f packages/*.ipa "packages/$name.ipa"
           echo "name=$name" >> $GITHUB_OUTPUT
 
