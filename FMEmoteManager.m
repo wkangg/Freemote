@@ -60,12 +60,12 @@
         fetch(globalLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzGlobalEmotes] type:FFZGlobal]; });
     if(needsGlobals && sevenTV)
         fetch(globalLists, 2, ^NSArray *{
-            NSDictionary *info = [httpClient sevenTVGlobalEmotes];
+            id info = [httpClient sevenTVGlobalEmotes];
             return [self emotesFromInfo:[info isKindOfClass:[NSDictionary class]] ? info[@"emotes"] : nil type:SevenTVGlobal];
         });
     if(bttv)
         fetch(channelLists, 0, ^NSArray *{
-            NSDictionary *info = [httpClient bttvEmoteInformationForChannelID:channelID];
+            id info = [httpClient bttvEmoteInformationForChannelID:channelID];
             if(![info isKindOfClass:[NSDictionary class]])
                 return @[];
             return [[self emotesFromInfo:info[@"channelEmotes"] type:BTTV] arrayByAddingObjectsFromArray:[self emotesFromInfo:info[@"sharedEmotes"] type:BTTV]];
@@ -74,7 +74,7 @@
         fetch(channelLists, 1, ^NSArray *{ return [self emotesFromInfo:[httpClient ffzEmoteInformationForChannelID:channelID] type:FFZ]; });
     if(sevenTV)
         fetch(channelLists, 2, ^NSArray *{
-            NSDictionary *info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
+            id info = [httpClient sevenTVEmoteInformationForChannelID:channelID];
             id emoteSet = [info isKindOfClass:[NSDictionary class]] ? info[@"emote_set"] : nil;
             return [self emotesFromInfo:[emoteSet isKindOfClass:[NSDictionary class]] ? emoteSet[@"emotes"] : nil type:SevenTV];
         });
