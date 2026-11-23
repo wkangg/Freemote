@@ -1583,9 +1583,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
     if(textStart.location == NSNotFound)
         return line;
     NSString *text = [rest substringFromIndex:NSMaxRange(textStart)];
-    // /me: positions are in the action's text
-    if([text hasPrefix:@"\x01" "ACTION "])
-        text = [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+    text = FMIRCActionText(text);
 
     NSUInteger emoteCount = 0;
     NSString *ourEmotes = ircEmotesForText(text, [emoteManager emoteNameRegistryForChannel:channelID], ircEmotePositions(emotes), &emoteCount);

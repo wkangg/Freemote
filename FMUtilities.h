@@ -34,3 +34,10 @@ static inline void FMEnumerateIRCEmotes(NSString *tag, void (^block)(NSString *e
         }
     }
 }
+
+// The text of a /me ("\x01ACTION <text>\x01"), which IRC emote positions count from, or the text as is
+static inline NSString *FMIRCActionText(NSString *text) {
+    if(![text hasPrefix:@"\x01" "ACTION "])
+        return text;
+    return [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+}

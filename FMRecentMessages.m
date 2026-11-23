@@ -143,9 +143,7 @@ static NSMutableDictionary *chatHistoryMessageFromIRCLine(NSString *line, BOOL *
     NSString *text = [rest substringFromIndex:words[0].length + words[1].length + words[2].length + 3];
     if([text hasPrefix:@":"])
         text = [text substringFromIndex:1];
-    // /me: the emotes tag counts from the start of the action's text
-    if([text hasPrefix:@"\x01" "ACTION "])
-        text = [[text substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\x01"]];
+    text = FMIRCActionText(text);
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
 
     NSMutableArray *badges = [[NSMutableArray alloc] init];
