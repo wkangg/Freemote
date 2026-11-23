@@ -72,7 +72,11 @@ jobs:
       contents: write
 
     steps:
+      # This job's token can write, and it runs theos-jailed's install script, so the checkouts don't leave the token in
+      # git config. Nothing here pushes.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Get package info
         id: package_info
@@ -126,6 +130,7 @@ jobs:
           repository: level3tjg/theos-jailed
           path: theos-jailed
           submodules: recursive
+          persist-credentials: false
 
       - name: Install theos-jailed
         run: |
