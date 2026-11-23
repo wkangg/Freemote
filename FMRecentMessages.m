@@ -1,13 +1,10 @@
 #import "FMRecentMessages.h"
 #import "FMLog.h"
+#import "FMUtilities.h"
 
 // More than the chat holds: deleted messages are among them, and are left out unless they're kept
 #define FMRecentMessagesRequestLimit 250
 #define FMRecentMessagesRequestTimeout 5
-
-static BOOL isNull(id value) {
-    return !value || value == [NSNull null];
-}
 
 // An IRC tag's value: "\s" is a space, "\:" a semicolon
 static NSString *unescapedTagValue(NSString *value) {
@@ -212,7 +209,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         NSDate *date = [messageID isKindOfClass:[NSString class]] ? dateFromSentAt(message[@"sentAt"]) : nil;
         if(!date)
             return nil;
-        BOOL deleted = !isNull(message[@"deletedAt"]);
+        BOOL deleted = !FMIsNull(message[@"deletedAt"]);
         if(deleted && deletedIDs) {
             // The service's copy is sure to have its text
             if([recentIDs containsObject:messageID]) {
@@ -311,7 +308,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         self.messages = messages;
         // error_code: e.g. channel_not_joined the first time anyone asks for a channel, with no messages yet
         FMLog("Recent messages for %@: %lu chat messages (%lu deleted) in %lu lines in %.1fs (%@)", _channelLogin, (unsigned long)messages.count, (unsigned long)deletedIDs.count, (unsigned long)lines.count, duration,
-              isNull(json[@"error_code"]) ? @"no error" : json[@"error_code"]);
+              FMIsNull(json[@"error_code"]) ? @"no error" : json[@"error_code"]);
     }
     self.done = YES;
     dispatch_group_leave(_request);

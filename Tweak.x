@@ -6,6 +6,7 @@
 #import "FMReactNativePatch.h"
 #import "FMRecentMessages.h"
 #import "FMSettings.h"
+#import "FMUtilities.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
@@ -429,10 +430,6 @@ static NSUInteger codePointCount(NSString *text) {
     return [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4;
 }
 
-static BOOL isNull(id value) {
-    return !value || value == [NSNull null];
-}
-
 // Marks that join onto the character before them, like U+034F, which chatters add to get around the duplicate message
 // check. After a space or an emote they'd glue the two into one composed sequence for anything that splits by those,
 // so they're taken out there: they're invisible anyway.
@@ -466,7 +463,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
         }
         NSUInteger length = codePointCount(text);
         NSDictionary *emote = fragment[@"emote"];
-        if(!isNull(emote) || !isNull(fragment[@"mention"])) {
+        if(!FMIsNull(emote) || !FMIsNull(fragment[@"mention"])) {
             // Twitch's emotes move up by whatever was taken out before them (their ID has the position too)
             if([emote isKindOfClass:[NSDictionary class]] && length && ![emote[@"from"] isEqual:@(offset)]) {
                 NSMutableDictionary *movedEmote = [emote mutableCopy];
@@ -480,7 +477,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
             }
             [newFragments addObject:fragment];
             offset += length;
-            afterEmote = !isNull(emote);
+            afterEmote = !FMIsNull(emote);
             continue;
         }
 
@@ -518,7 +515,7 @@ static NSArray *addEmotesToVideoCommentFragments(NSArray *fragments, NSDictionar
 
     // Real messages never end in whitespace, and taking the marks out can leave some (in "LOL \u034f")
     NSDictionary *last = newFragments.lastObject;
-    if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && isNull(last[@"emote"]) && isNull(last[@"mention"])) {
+    if([last isKindOfClass:[NSDictionary class]] && [last[@"text"] isKindOfClass:[NSString class]] && FMIsNull(last[@"emote"]) && FMIsNull(last[@"mention"])) {
         NSString *lastText = last[@"text"];
         NSRange end = [lastText rangeOfCharacterFromSet:[NSCharacterSet whitespaceCharacterSet].invertedSet options:NSBackwardsSearch];
         NSUInteger keep = end.location == NSNotFound ? 0 : NSMaxRange(end);
