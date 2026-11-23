@@ -327,6 +327,14 @@ static NSArray *gqlOperations(NSURLRequest *request) {
     return operations;
 }
 
+// Calls the block with each operation in the request and its response: one, or a batch of them
+static void enumerateGQLResponses(id json, NSURLRequest *request, void (^block)(NSDictionary *operation, id response)) {
+    NSArray *operations = gqlOperations(request);
+    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
+    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++)
+        block(operations[i], responses[i]);
+}
+
 // The variables of each chat history operation in the request
 static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL log) {
     NSMutableArray *variablesList = [[NSMutableArray alloc] init];
@@ -610,13 +618,10 @@ static BOOL isEmoteCardRequest(NSURLRequest *request) {
 // Twitch doesn't know our emotes, so their cards get a made-up emote instead: a global one with no owner, which the
 // card shows with just the image and name. The image goes through the URL rewrite like in chat.
 static void addEmoteCards(id json, NSURLRequest *request) {
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        FMEmote *emote = emoteCardEmoteFor(operations[i]);
-        NSMutableDictionary *response = responses[i];
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        FMEmote *emote = emoteCardEmoteFor(operation);
         if(!emote || ![response isKindOfClass:[NSMutableDictionary class]])
-            continue;
+            return;
         // Its own ID (the image rewrite ignores anything after the emote ID): Apollo caches emotes by ID, and the
         // emote picker's copy of this emote (no type) mustn't turn into a GLOBALS one, or the other way around
         response[@"data"] = @{@"emote": @{
@@ -625,7 +630,7 @@ static void addEmoteCards(id json, NSURLRequest *request) {
         }};
         [response removeObjectForKey:@"errors"];
         FMLog("Answered the emote card for %@", emote.emoteText);
-    }
+    });
 }
 
 #pragma mark - Emote picker
@@ -779,24 +784,22 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
 }
 
 static void addEmotePickerSets(id json, NSURLRequest *request) {
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        NSString *channelID = emoteSetsChannelIDFor(operations[i]);
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        NSString *channelID = emoteSetsChannelIDFor(operation);
         if(!channelID)
-            continue;
-        NSMutableDictionary *channelSelf = FMValueAtPath(responses[i], @[@"data", @"channel", @"self"]);
+            return;
+        NSMutableDictionary *channelSelf = FMValueAtPath(response, @[@"data", @"channel", @"self"]);
         NSArray *sets = [channelSelf isKindOfClass:[NSMutableDictionary class]] ? channelSelf[@"availableEmoteSets"] : nil;
         if(![sets isKindOfClass:[NSArray class]]) {
             // Logged out (no self), or the response shape changed
             FMLog("ChatEmoteSets for channel %@ has no availableEmoteSets, the emote picker stays as is", channelID);
-            continue;
+            return;
         }
         NSString *summary;
         NSArray<NSDictionary *> *newSets = emotePickerSets(channelID, &summary);
         channelSelf[@"availableEmoteSets"] = [sets arrayByAddingObjectsFromArray:newSets];
         FMLog("Emote picker for channel %@: added %@ emotes (%s)", channelID, summary, [emoteManager hasEmotesForChannel:channelID] ? "all loaded" : "still loading");
-    }
+    });
 }
 
 static id swiftIvar(id object, const char *name) {
@@ -1203,15 +1206,13 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
     if(!recent)
         return;
     BOOL late = !recent.done;
-    NSArray *operations = gqlOperations(request);
-    NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
-    for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
-        if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operations[i])])
-            continue;
-        NSMutableDictionary *channel = FMValueAtPath(responses[i], @[@"data", @"channel"]);
+    enumerateGQLResponses(json, request, ^(NSDictionary *operation, id response) {
+        if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operation)])
+            return;
+        NSMutableDictionary *channel = FMValueAtPath(response, @[@"data", @"channel"]);
         if(![channel isKindOfClass:[NSMutableDictionary class]]) {
             FMLog("ChatHistory for %@ has no channel, its chat history stays as is", recent.channelLogin);
-            continue;
+            return;
         }
         NSArray *messages = [channel[@"recentChatMessages"] isKindOfClass:[NSArray class]] ? channel[@"recentChatMessages"] : @[];
         if(late) {
@@ -1221,20 +1222,20 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             NSString *channelID = channel[@"id"];
             if(![twitchMessages isKindOfClass:[NSArray class]] || !FMIsChannelID(channelID)) {
                 FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
-                continue;
+                return;
             }
             FMLog("Recent messages for %@ didn't come in time, they'll be added when they do", recent.channelLogin);
             [recent whenDone:^{
                 addLateRecentMessages(recent, twitchMessages, channelID);
             }];
-            continue;
+            return;
         }
         NSMutableSet<NSString *> *deletedIDs = canKeepDeletedHistoryMessages() ? [[NSMutableSet alloc] init] : nil;
         NSArray *merged = FMMergeChatHistory(messages, recent, deletedIDs);
         if(!merged) {
             // The response shape changed
             FMLog("ChatHistory for %@ has a message without an ID or time, its chat history stays as is", recent.channelLogin);
-            continue;
+            return;
         }
         channel[@"recentChatMessages"] = merged;
         // Before the response is handed over, so the rows know by the time they're drawn
@@ -1242,7 +1243,7 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             sendDeletedHistoryMessages(deletedIDs);
         FMLog("Chat history for %@: %lu messages from Twitch and %lu recent messages make %lu (%lu deleted, %s)", recent.channelLogin,
               (unsigned long)messages.count, (unsigned long)recent.messages.count, (unsigned long)merged.count, (unsigned long)deletedIDs.count, deletedIDs ? "kept" : "left out");
-    }
+    });
 }
 
 #pragma mark - Held back responses
