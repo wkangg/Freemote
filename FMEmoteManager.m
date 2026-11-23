@@ -5,6 +5,8 @@
 @interface FMEmoteManager ()
 // Channels whose requests have all finished. Their emotes are published as each request finishes, before this.
 @property (atomic, copy) NSSet<NSString *> *loadedChannelIDs;
+// Replaced wholesale on update, like the public registries
+@property (atomic, copy) NSDictionary<NSString *, FMEmote *> *globalNameRegistry;
 @end
 
 @implementation FMEmoteManager
