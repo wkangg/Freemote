@@ -44,12 +44,6 @@ static BOOL claimingEnabled(void) {
     return [NSUserDefaults.standardUserDefaults boolForKey:FMClaimChannelPointsKey];
 }
 
-static id valueAt(id json, NSArray<NSString *> *path) {
-    for(NSString *key in path)
-        json = [json isKindOfClass:[NSDictionary class]] ? json[key] : nil;
-    return json;
-}
-
 // Calls completion on pointsQueue with the response's data, or nil and the error message if there is one
 static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *integrityToken, NSString *operationName, NSString *hash, NSString *query, NSDictionary *variables, void (^completion)(NSDictionary *data, NSString *errorMessage)) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gql.twitch.tv/gql"]];
@@ -70,15 +64,15 @@ static void sendGQL(NSDictionary<NSString *, id> *headers, NSString *integrityTo
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *responseData, NSURLResponse *response, NSError *error) {
         id json = responseData ? [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil] : nil;
-        NSArray *errors = valueAt(json, @[@"errors"]);
-        NSString *message = [errors isKindOfClass:[NSArray class]] ? valueAt(errors.firstObject, @[@"message"]) : nil;
+        NSArray *errors = FMValueAtPath(json, @[@"errors"]);
+        NSString *message = [errors isKindOfClass:[NSArray class]] ? FMValueAtPath(errors.firstObject, @[@"message"]) : nil;
         message = [message isKindOfClass:[NSString class]] ? message : nil;
         if(hash && [message containsString:@"PersistedQuery"]) {
             FMLog("Twitch doesn't know the %@ hash (%@), sending it as text", operationName, message);
             sendGQL(headers, integrityToken, operationName, nil, query, variables, completion);
             return;
         }
-        NSDictionary *data = valueAt(json, @[@"data"]);
+        NSDictionary *data = FMValueAtPath(json, @[@"data"]);
         if(![data isKindOfClass:[NSDictionary class]] || message) {
             FMLog("%@ failed (HTTP %ld): %@", operationName, (long)((NSHTTPURLResponse *)response).statusCode, message ?: error.localizedDescription);
             data = nil;
@@ -149,8 +143,8 @@ static void claim(NSString *channelID, NSString *claimID, BOOL retry);
 // Only on pointsQueue. refreshed: the token is a new one already, so an integrity failure isn't tried again.
 static void sendClaim(NSString *channelID, NSString *claimID, NSString *token, BOOL refreshed, BOOL retry) {
     sendGQL(claimHeaders(), token, @"ClaimChannelPoints", FMClaimHash, FMClaimQuery, @{@"input": @{@"channelID": channelID, @"claimID": claimID}}, ^(NSDictionary *data, NSString *errorMessage) {
-        NSDictionary *result = valueAt(data, @[@"claimCommunityPoints"]);
-        id errorCode = valueAt(result, @[@"error", @"code"]);
+        NSDictionary *result = FMValueAtPath(data, @[@"claimCommunityPoints"]);
+        id errorCode = FMValueAtPath(result, @[@"error", @"code"]);
         if(![result isKindOfClass:[NSDictionary class]]) {
             if(!refreshed && [errorMessage rangeOfString:@"integrity" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 FMLog("Claiming again with a new integrity token");
@@ -171,7 +165,7 @@ static void sendClaim(NSString *channelID, NSString *claimID, NSString *token, B
         if(errorCode && errorCode != [NSNull null])
             FMLog("Couldn't claim the channel points bonus in channel %@: %@", channelID, errorCode);
         else
-            FMLog("Claimed %@ channel points in channel %@ (%@ now)", valueAt(result, @[@"claim", @"pointsEarnedTotal"]), channelID, result[@"currentPoints"]);
+            FMLog("Claimed %@ channel points in channel %@ (%@ now)", FMValueAtPath(result, @[@"claim", @"pointsEarnedTotal"]), channelID, result[@"currentPoints"]);
     });
 }
 
@@ -206,7 +200,7 @@ static void checkChannel(NSString *channelID) {
         return;
     checkedChannels[channelID] = [NSDate date];
     sendGQL(headers, nil, @"ChannelPoints", FMChannelPointsHash, FMChannelPointsQuery, @{@"channel": channelID, @"includeSettings": @NO, @"includeUserInfo": @YES}, ^(NSDictionary *data, NSString *errorMessage) {
-        NSString *claimID = valueAt(data, @[@"user", @"channel", @"selfView", @"communityPoints", @"availableClaim", @"id"]);
+        NSString *claimID = FMValueAtPath(data, @[@"user", @"channel", @"selfView", @"communityPoints", @"availableClaim", @"id"]);
         if([claimID isKindOfClass:[NSString class]] && claimID.length)
             claim(channelID, claimID, YES);
     });
@@ -262,7 +256,7 @@ static void findClaims(id json, NSUInteger depth, void (^found)(NSString *channe
         for(id item in json)
             findClaims(item, depth + 1, found);
     } else if([json isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *claim = valueAt(json, @[@"data", @"claim"]);
+        NSDictionary *claim = FMValueAtPath(json, @[@"data", @"claim"]);
         if([@"claim-available" isEqual:json[@"type"]] && [claim isKindOfClass:[NSDictionary class]]) {
             if(FMIsChannelID(claim[@"channel_id"]) && [claim[@"id"] isKindOfClass:[NSString class]])
                 found(claim[@"channel_id"], claim[@"id"]);

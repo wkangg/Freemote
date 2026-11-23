@@ -775,10 +775,7 @@ static void addEmotePickerSets(id json, NSURLRequest *request) {
         NSString *channelID = emoteSetsChannelIDFor(operations[i]);
         if(!channelID)
             continue;
-        NSDictionary *response = responses[i];
-        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
-        NSDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
-        NSMutableDictionary *channelSelf = [channel isKindOfClass:[NSDictionary class]] ? channel[@"self"] : nil;
+        NSMutableDictionary *channelSelf = FMValueAtPath(responses[i], @[@"data", @"channel", @"self"]);
         NSArray *sets = [channelSelf isKindOfClass:[NSMutableDictionary class]] ? channelSelf[@"availableEmoteSets"] : nil;
         if(![sets isKindOfClass:[NSArray class]]) {
             // Logged out (no self), or the response shape changed
@@ -1201,9 +1198,7 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
     for(NSUInteger i = 0; i < operations.count && i < responses.count; i++) {
         if(![recent.channelLogin isEqual:chatHistoryChannelLoginFor(operations[i])])
             continue;
-        NSDictionary *response = responses[i];
-        NSDictionary *data = [response isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
-        NSMutableDictionary *channel = [data isKindOfClass:[NSDictionary class]] ? data[@"channel"] : nil;
+        NSMutableDictionary *channel = FMValueAtPath(responses[i], @[@"data", @"channel"]);
         if(![channel isKindOfClass:[NSMutableDictionary class]]) {
             FMLog("ChatHistory for %@ has no channel, its chat history stays as is", recent.channelLogin);
             continue;

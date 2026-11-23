@@ -1,5 +1,6 @@
 #import "FMHTTPClient.h"
 #import "FMLog.h"
+#import "FMUtilities.h"
 
 @implementation FMHTTPClient
 
@@ -77,9 +78,8 @@
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
     // Any level can be null
-    id value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    for(NSString *key in [@[@"data"] arrayByAddingObjectsFromArray:path])
-        value = [value isKindOfClass:[NSDictionary class]] ? value[key] : nil;
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    id value = FMValueAtPath(json, [@[@"data"] arrayByAddingObjectsFromArray:path]);
     if(![value isKindOfClass:[NSString class]]) {
         FMLog("GQL query failed (%lu bytes): %@", (unsigned long)data.length, error.localizedDescription);
         return nil;
