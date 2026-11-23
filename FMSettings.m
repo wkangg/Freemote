@@ -1,5 +1,6 @@
 #import "FMSettings.h"
 #import "FMLog.h"
+#import "FMRecentMessages.h"
 
 NSString *const FMBTTVEnabledKey = @"FreemoteBTTVEnabled";
 NSString *const FMFFZEnabledKey = @"FreemoteFFZEnabled";
@@ -68,7 +69,7 @@ void FMRegisterDefaults(void) {
     if(section == 1)
         return @"Messages deleted by a moderator, or from a user who was timed out or banned, stay in chat, dimmed, including ones in the chat history. Chat also stays when a moderator clears it.";
     if(section == 2)
-        return @"Fills chat with up to 150 earlier messages when you open a stream, from recent-messages.robotty.de, which is sent the channel's name. Not on vertical streams.";
+        return [NSString stringWithFormat:@"Fills chat with up to %d earlier messages when you open a stream, from recent-messages.robotty.de, which is sent the channel's name. Not on vertical streams.", FMChatHistoryLimit];
     if(section == 3)
         return @"Claims the bonus chest as soon as it shows up, in any chat you have open.";
     return @"Records emote loads, requests and channel points claims to a file you can share when something goes wrong.\n\n"
