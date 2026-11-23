@@ -88,11 +88,17 @@
     return YES;
 }
 
-- (NSString *)emoteDescription {
-    NSString *provider = _emoteType == BTTV || _emoteType == BTTVGlobal ? @"BetterTTV"
+- (BOOL)isGlobal {
+    return _emoteType == BTTVGlobal || _emoteType == FFZGlobal || _emoteType == SevenTVGlobal;
+}
+
+- (NSString *)providerName {
+    return _emoteType == BTTV || _emoteType == BTTVGlobal ? @"BetterTTV"
         : _emoteType == FFZ || _emoteType == FFZGlobal ? @"FrankerFaceZ" : @"7TV";
-    BOOL global = _emoteType == BTTVGlobal || _emoteType == FFZGlobal || _emoteType == SevenTVGlobal;
-    NSString *description = [NSString stringWithFormat:@"%@ %@ Emote", provider, global ? @"Global" : @"Channel"];
+}
+
+- (NSString *)emoteDescription {
+    NSString *description = [NSString stringWithFormat:@"%@ %@ Emote", self.providerName, self.isGlobal ? @"Global" : @"Channel"];
     return _ownerName.length ? [description stringByAppendingFormat:@" by %@", _ownerName] : description;
 }
 

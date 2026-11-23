@@ -15,6 +15,8 @@ typedef enum {
 @property (assign) double aspectRatio; // width / height, 0 if the API doesn't say (drawn square like Twitch's)
 @property (assign) BOOL isZeroWidth; // drawn over the emote before it (7TV)
 @property (assign) EmoteType emoteType;
+@property (readonly) BOOL isGlobal;
+@property (readonly) NSString *providerName; // "BetterTTV", "FrankerFaceZ" or "7TV"
 
 - (id)initWithDictData:(NSDictionary *)data emoteType:(EmoteType)type;
 // e.g. "7TV Channel Emote", for the emote card

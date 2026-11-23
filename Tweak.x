@@ -733,25 +733,26 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
         @{@"login": @"betterttv", @"displayName": @"BetterTTV", @"profileImageURL": @"https://betterttv.com/favicon.png"},
         @{@"login": @"frankerfacez", @"displayName": @"FrankerFaceZ", @"profileImageURL": @"https://www.frankerfacez.com/static/images/favicon-96.png"},
     ];
-    NSArray<NSMutableArray<NSString *> *> *names = @[[NSMutableArray array], [NSMutableArray array], [NSMutableArray array]];
+    // Provider name -> its emotes' names
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *namesByProvider = [[NSMutableDictionary alloc] init];
+    for(NSDictionary *provider in providers)
+        namesByProvider[provider[@"displayName"]] = [NSMutableArray array];
     NSDictionary<NSString *, FMEmote *> *nameRegistry = [emoteManager emoteNameRegistryForChannel:channelID];
     [nameRegistry enumerateKeysAndObjectsUsingBlock:^(NSString *name, FMEmote *emote, BOOL *stop) {
-        EmoteType type = emote.emoteType;
-        [names[type == SevenTV || type == SevenTVGlobal ? 0 : type == BTTV || type == BTTVGlobal ? 1 : 2] addObject:name];
+        [namesByProvider[emote.providerName] addObject:name];
     }];
 
     NSMutableArray<NSDictionary *> *sets = [[NSMutableArray alloc] init];
     NSMutableArray<NSString *> *counts = [[NSMutableArray alloc] init];
     for(NSUInteger i = 0; i < providers.count; i++) {
-        [names[i] sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-            EmoteType typeA = nameRegistry[a].emoteType, typeB = nameRegistry[b].emoteType;
-            BOOL globalA = typeA == BTTVGlobal || typeA == FFZGlobal || typeA == SevenTVGlobal;
-            BOOL globalB = typeB == BTTVGlobal || typeB == FFZGlobal || typeB == SevenTVGlobal;
+        NSMutableArray<NSString *> *names = namesByProvider[providers[i][@"displayName"]];
+        [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+            BOOL globalA = nameRegistry[a].isGlobal, globalB = nameRegistry[b].isGlobal;
             if(globalA != globalB)
                 return globalA ? NSOrderedDescending : NSOrderedAscending;
             return [a localizedCaseInsensitiveCompare:b];
         }];
-        if(!names[i].count) {
+        if(!names.count) {
             [counts addObject:[NSString stringWithFormat:@"%@ 0", providers[i][@"displayName"]]];
             continue;
         }
@@ -762,7 +763,7 @@ static NSArray<NSDictionary *> *emotePickerSets(NSString *channelID, NSString **
         // A 7TV channel can add a global under an alias: one ID under two names. Apollo would merge the two into one
         // cached emote and the picker would drop one, so only the first (the channel's name) goes in.
         NSMutableSet<NSString *> *addedIDs = [[NSMutableSet alloc] init];
-        for(NSString *name in names[i]) {
+        for(NSString *name in names) {
             FMEmote *emote = nameRegistry[name];
             if([addedIDs containsObject:emote.emoteID])
                 continue;
