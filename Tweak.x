@@ -1,4 +1,3 @@
-#import <UIKit/UIKit.h>
 #import "Tweak.h"
 #import "FMChannelPoints.h"
 #import "FMEmoteManager.h"
@@ -10,7 +9,6 @@
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
-
 
 // Emote tokens we inject get this ID prefix, so their image requests can be recognized and redirected
 #define FMEmoteIDPrefix @"freemote_"

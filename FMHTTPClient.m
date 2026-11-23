@@ -5,7 +5,7 @@
 @implementation FMHTTPClient
 
 - (id)bttvEmoteInformationForChannelID:(NSString *)channelID {
-    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/users/twitch/" stringByAppendingString:channelID]]];  
+    return [self getJSON:[NSURL URLWithString:[@"https://api.betterttv.net/3/cached/users/twitch/" stringByAppendingString:channelID]]];
 }
 
 - (id)ffzEmoteInformationForChannelID:(NSString *)channelID {
@@ -35,7 +35,6 @@
 - (id)ffzGlobalSets {
     return [self getJSON:[NSURL URLWithString:@"https://api.frankerfacez.com/v1/set/global"]];
 }
-
 
 - (NSString *)ownerIDForVideoID:(NSString *)videoID {
     NSDate *start = [NSDate date];

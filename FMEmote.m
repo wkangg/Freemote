@@ -2,7 +2,7 @@
 
 @implementation FMEmote
 
-- (id)initWithDictData:(NSDictionary *)data emoteType:(EmoteType)type {
+- (instancetype)initWithDictData:(NSDictionary *)data emoteType:(EmoteType)type {
     self = [super init];
 
     if(self) {

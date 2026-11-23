@@ -189,15 +189,8 @@
 }
 
 - (NSURL *)imageURLForEmoteID:(NSString *)emoteID {
-
     FMEmote *emote = self.emoteRegistry[emoteID];
-    if(emote) {
-        if(emote.image2x)
-            return emote.image2x;
-        else if(emote.image1x)
-            return emote.image1x;
-    }
-    return nil;
+    return emote.image2x ?: emote.image1x;
 }
 
 @end
