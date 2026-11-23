@@ -308,13 +308,23 @@ static NSDictionary<NSString *, FMEmote *> *waitForVideoEmotes(NSString *videoID
 // KMPMobileChat
 static NSSet<NSString *> *chatHistoryOperations;
 
-// The GQL operations in a request: its body is one operation or a batch of them
+static char gqlOperationsKey;
+
+// The GQL operations in a request: its body is one operation or a batch of them. A request is looked at by several
+// checks, so an immutable one keeps them rather than having its body parsed each time.
 static NSArray *gqlOperations(NSURLRequest *request) {
     if(![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody)
         return @[];
+    BOOL immutable = ![request isKindOfClass:[NSMutableURLRequest class]];
+    NSArray *operations = immutable ? objc_getAssociatedObject(request, &gqlOperationsKey) : nil;
+    if(operations)
+        return operations;
 
     id json = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
-    return [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}];
+    operations = [json isKindOfClass:[NSArray class]] ? json : @[json ?: @{}];
+    if(immutable)
+        objc_setAssociatedObject(request, &gqlOperationsKey, operations, OBJC_ASSOCIATION_RETAIN);
+    return operations;
 }
 
 // The variables of each chat history operation in the request
