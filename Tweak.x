@@ -107,13 +107,14 @@ static NSString *codePointsOf(NSString *word) {
 }
 
 // For finding other characters that keep a word from matching: logs words that are an emote name once everything but
-// letters and digits is taken out
+// letters and digits is taken out. Only the first few, and words aren't looked at after that.
 static void logNearMiss(NSString *word, NSDictionary<NSString *, FMEmote *> *nameRegistry) {
-    if([word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
+    static atomic_int logged;
+    if(atomic_load(&logged) >= 10 || [word rangeOfCharacterFromSet:[NSCharacterSet alphanumericCharacterSet].invertedSet].location == NSNotFound)
         return;
     NSString *stripped = [[word componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet] componentsJoinedByString:@""];
-    if(stripped.length && nameRegistry[stripped])
-        FMLogFirst(10, "Word looks like emote %@ but doesn't match: %@", stripped, codePointsOf(word));
+    if(stripped.length && nameRegistry[stripped] && atomic_fetch_add(&logged, 1) < 10)
+        FMLog("Word looks like emote %@ but doesn't match: %@", stripped, codePointsOf(word));
 }
 
 // Splits text at emote names, but only if it contains one: returns NO without calling either block otherwise.
