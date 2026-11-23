@@ -1490,11 +1490,11 @@ static NSString *ircEmotesForText(NSString *text, NSDictionary<NSString *, FMEmo
 static NSString *durationText(long long seconds) {
     long long sizes[] = {86400, 3600, 60, 1};
     NSString *units[] = {@"day", @"hour", @"minute", @"second"};
-    for(int i = 0; i < 4; i++) {
-        if(seconds % sizes[i] == 0)
-            return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
-    }
-    return nil;
+    int i = 0;
+    // Any number of seconds is a whole number of the last unit
+    while(seconds % sizes[i])
+        i++;
+    return [NSString stringWithFormat:@"%lld %@%@", seconds / sizes[i], units[i], seconds / sizes[i] == 1 ? @"" : @"s"];
 }
 
 // Channels ("#name") where you're a moderator or the broadcaster, from your USERSTATE there. @synchronized
