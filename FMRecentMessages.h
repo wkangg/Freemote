@@ -22,10 +22,6 @@
 @property (atomic, readonly) NSSet<NSString *> *deletedIDs;
 @end
 
-// One IRC line (as the service returns them) as a recentChatMessages message, or nil if it isn't a chat message.
-// deleted: whether the service says it was deleted.
-NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted);
-
 // Twitch's recentChatMessages with the messages from recentMessages it doesn't have, by time, cut down to the newest
 // FMChatHistoryLimit. Twitch's copy of a message wins. nil if one of Twitch's messages has no ID or time to go by.
 // Deleted messages are left out, unless deletedIDs is given: then they stay (the chat drops any with a deletedAt, so

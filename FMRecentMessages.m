@@ -127,9 +127,11 @@ static NSDictionary *user(NSString *userID, NSString *login, NSString *displayNa
     return @{@"__typename": @"User", @"id": userID, @"login": login, @"displayName": displayName.length ? displayName : login};
 }
 
+// One IRC line (as the service returns them) as a recentChatMessages message, or nil if it isn't a chat message.
+// deleted: whether the service says it was deleted.
 // "@<tags> :<login>!<login>@<login>.tmi.twitch.tv PRIVMSG #<channel> :<text>". The service leaves the ":" off a text
 // of one word.
-NSMutableDictionary *FMChatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted) {
+static NSMutableDictionary *chatHistoryMessageFromIRCLine(NSString *line, BOOL *deleted) {
     NSRange tagsEnd = [line isKindOfClass:[NSString class]] ? [line rangeOfString:@" "] : (NSRange){NSNotFound, 0};
     if(tagsEnd.location == NSNotFound || ![line hasPrefix:@"@"])
         return nil;
@@ -298,7 +300,7 @@ NSArray *FMMergeChatHistory(NSArray *twitchMessages, FMRecentMessages *recentMes
         NSMutableSet<NSString *> *deletedIDs = [[NSMutableSet alloc] init];
         for(NSString *line in lines) {
             BOOL deleted = NO;
-            NSMutableDictionary *message = FMChatHistoryMessageFromIRCLine(line, &deleted);
+            NSMutableDictionary *message = chatHistoryMessageFromIRCLine(line, &deleted);
             if(!message)
                 continue;
             [messages addObject:message];
