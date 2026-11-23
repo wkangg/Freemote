@@ -1881,7 +1881,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         return event;
     if(![NSUserDefaults.standardUserDefaults boolForKey:FMKeepDeletedMessagesKey])
         return event;
-    if(MessageDeleted && [event isKindOfClass:MessageDeleted]) {
+    if([event isKindOfClass:MessageDeleted]) {
         KMPMCChannelEventChatChannelMessageDeleted *deleted = event;
         NSString *messageID = deleted.messageId;
         if(![messageID isKindOfClass:[NSString class]] || !messageID.length)
@@ -1892,7 +1892,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         refreshDeletedMessages();
         return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:deleted.senderLoginName deletedMessageContent:deleted.deletedMessageContent];
     }
-    if(UserMessagesCleared && [event isKindOfClass:UserMessagesCleared]) {
+    if([event isKindOfClass:UserMessagesCleared]) {
         NSString *userID = ((KMPMCChannelEventChatChannelUserMessagesCleared *)event).clearUserId;
         if(![userID isKindOfClass:[NSString class]] || !userID.length)
             return event;
@@ -1913,7 +1913,7 @@ static id eventKeepingMessages(id event, NSString *channelName) {
         refreshDeletedMessages();
         return [[UserMessagesCleared alloc] initWithClearUserId:@""];
     }
-    if(MessagesCleared && [event isKindOfClass:MessagesCleared]) {
+    if([event isKindOfClass:MessagesCleared]) {
         FMLogFirst(1, "Kept native chat through a /clear");
         return [[MessageDeleted alloc] initWithMessageId:@"" senderLoginName:nil deletedMessageContent:nil];
     }
