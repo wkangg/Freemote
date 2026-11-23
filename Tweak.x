@@ -1430,16 +1430,9 @@ static NSData *finishHeldResponse(NSURLSessionTask *task, NSError *error, BOOL w
 // The positions the message's emotes tag already covers
 static NSIndexSet *ircEmotePositions(NSString *emotes) {
     NSMutableIndexSet *positions = [[NSMutableIndexSet alloc] init];
-    for(NSString *emote in [emotes componentsSeparatedByString:@"/"]) {
-        NSRange colon = [emote rangeOfString:@":"];
-        if(colon.location == NSNotFound)
-            continue;
-        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
-            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
-            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue)
-                [positions addIndexesInRange:NSMakeRange(ends[0].integerValue, ends[1].integerValue - ends[0].integerValue + 1)];
-        }
-    }
+    FMEnumerateIRCEmotes(emotes, ^(NSString *emoteID, NSUInteger from, NSUInteger to) {
+        [positions addIndexesInRange:NSMakeRange(from, to - from + 1)];
+    });
     return positions;
 }
 

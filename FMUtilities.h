@@ -19,3 +19,18 @@ static inline id FMValueAtPath(id json, NSArray<NSString *> *path) {
         json = [json isKindOfClass:[NSDictionary class]] ? json[key] : nil;
     return json;
 }
+
+// Each emote position in an IRC emotes tag: "<id>:<from>-<to>,.../...", in code points, `to` inclusive
+static inline void FMEnumerateIRCEmotes(NSString *tag, void (^block)(NSString *emoteID, NSUInteger from, NSUInteger to)) {
+    for(NSString *emote in [tag componentsSeparatedByString:@"/"]) {
+        NSRange colon = [emote rangeOfString:@":"];
+        if(colon.location == NSNotFound || colon.location == 0)
+            continue;
+        NSString *emoteID = [emote substringToIndex:colon.location];
+        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
+            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
+            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue)
+                block(emoteID, ends[0].integerValue, ends[1].integerValue);
+        }
+    }
+}

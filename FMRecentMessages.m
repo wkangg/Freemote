@@ -89,16 +89,10 @@ static NSMutableArray *fragmentsFromText(NSString *text, NSString *emotesTag) {
 
     // [from, to, emote ID]
     NSMutableArray<NSArray *> *emotes = [[NSMutableArray alloc] init];
-    for(NSString *emote in [emotesTag componentsSeparatedByString:@"/"]) {
-        NSRange colon = [emote rangeOfString:@":"];
-        if(colon.location == NSNotFound || colon.location == 0)
-            continue;
-        for(NSString *range in [[emote substringFromIndex:NSMaxRange(colon)] componentsSeparatedByString:@","]) {
-            NSArray<NSString *> *ends = [range componentsSeparatedByString:@"-"];
-            if(ends.count == 2 && ends[0].integerValue >= 0 && ends[1].integerValue >= ends[0].integerValue && (NSUInteger)ends[1].integerValue < length)
-                [emotes addObject:@[@(ends[0].integerValue), @(ends[1].integerValue), [emote substringToIndex:colon.location]]];
-        }
-    }
+    FMEnumerateIRCEmotes(emotesTag, ^(NSString *emoteID, NSUInteger from, NSUInteger to) {
+        if(to < length)
+            [emotes addObject:@[@(from), @(to), emoteID]];
+    });
     [emotes sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
         return [(NSNumber *)a[0] compare:b[0]];
     }];
