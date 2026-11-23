@@ -240,11 +240,6 @@ static NSURL *rewriteEmoteURL(NSURL *url) {
     return imageURL ?: url;
 }
 
-static BOOL isChannelID(NSString *channelID) {
-    return [channelID isKindOfClass:[NSString class]] && channelID.length
-        && [channelID rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location == NSNotFound;
-}
-
 // Only on emoteQueue
 static void loadChannelEmotesNow(NSString *channelID) {
     if([emoteManager hasEmotesForChannel:channelID])
@@ -268,10 +263,10 @@ static void loadVideoEmotes(NSString *videoID, dispatch_block_t completion) {
         NSString *channelID = [channelIDsByVideoID objectForKey:videoID];
         if(!channelID) {
             channelID = [emoteManager.httpClient ownerIDForVideoID:videoID];
-            if(isChannelID(channelID))
+            if(FMIsChannelID(channelID))
                 [channelIDsByVideoID setObject:channelID forKey:videoID];
         }
-        if(isChannelID(channelID))
+        if(FMIsChannelID(channelID))
             loadChannelEmotesNow(channelID);
         if(completion)
             completion();
@@ -339,7 +334,7 @@ static NSArray<NSDictionary *> *chatHistoryVariables(NSURLRequest *request, BOOL
 // VOD comment queries only have the video ID (numeric, like channel IDs)
 static NSString *chatHistoryVideoID(NSURLRequest *request) {
     for(NSDictionary *variables in chatHistoryVariables(request, NO)) {
-        if(isChannelID(variables[@"videoID"]))
+        if(FMIsChannelID(variables[@"videoID"]))
             return variables[@"videoID"];
     }
     return nil;
@@ -349,9 +344,9 @@ static BOOL isChatHistoryRequest(NSURLRequest *request) {
     NSArray<NSDictionary *> *variablesList = chatHistoryVariables(request, YES);
     // Start on the emotes now so the response doesn't have to wait as long
     for(NSDictionary *variables in variablesList) {
-        if(isChannelID(variables[@"channelID"]))
+        if(FMIsChannelID(variables[@"channelID"]))
             loadChannelEmotes(variables[@"channelID"], nil);
-        if(isChannelID(variables[@"videoID"]))
+        if(FMIsChannelID(variables[@"videoID"]))
             loadVideoEmotes(variables[@"videoID"], nil);
     }
     return variablesList.count > 0;
@@ -394,7 +389,7 @@ static void addEmotesToChatHistory(id json, BOOL waitForEmotes) {
         return;
 
     NSArray *messages = json[@"recentChatMessages"];
-    if([messages isKindOfClass:[NSArray class]] && isChannelID(json[@"id"])) {
+    if([messages isKindOfClass:[NSArray class]] && FMIsChannelID(json[@"id"])) {
         // Otherwise whatever's in so far (globals at least, once they're in)
         NSDictionary<NSString *, FMEmote *> *nameRegistry = waitForEmotes ? waitForChannelEmotes(json[@"id"]) : [emoteManager emoteNameRegistryForChannel:json[@"id"]];
         BOOL loaded = [emoteManager hasEmotesForChannel:json[@"id"]];
@@ -637,7 +632,7 @@ static NSString *emoteSetsChannelIDFor(NSDictionary *operation) {
         return nil;
     NSDictionary *variables = operation[@"variables"];
     NSString *channelID = [variables isKindOfClass:[NSDictionary class]] ? variables[@"channelID"] : nil;
-    return isChannelID(channelID) ? channelID : nil;
+    return FMIsChannelID(channelID) ? channelID : nil;
 }
 
 static NSString *emoteSetsChannelID(NSURLRequest *request) {
@@ -1219,7 +1214,7 @@ static void addRecentMessages(id json, NSURLRequest *request, FMRecentMessages *
             NSData *messagesData = [NSJSONSerialization dataWithJSONObject:messages options:0 error:nil];
             NSArray *twitchMessages = messagesData ? [NSJSONSerialization JSONObjectWithData:messagesData options:NSJSONReadingMutableContainers error:nil] : nil;
             NSString *channelID = channel[@"id"];
-            if(![twitchMessages isKindOfClass:[NSArray class]] || !isChannelID(channelID)) {
+            if(![twitchMessages isKindOfClass:[NSArray class]] || !FMIsChannelID(channelID)) {
                 FMLog("Recent messages for %@ didn't come in time, its chat history stays as is", recent.channelLogin);
                 continue;
             }
@@ -1565,7 +1560,7 @@ static NSString *ircLineWithEmotes(NSString *line) {
             emotesIndex = i;
         }
     }
-    if(!isChannelID(channelID))
+    if(!FMIsChannelID(channelID))
         return line;
     if(![emoteManager hasEmotesForChannel:channelID]) {
         if([command isEqualToString:@"ROOMSTATE"])
@@ -2067,7 +2062,7 @@ static void dimIfDeleted(MessageStringView *view) {
     if(!channelID) {
         NSDictionary *tags = self.messageTags;
         NSString *roomID = [tags isKindOfClass:[NSDictionary class]] ? tags[@"room-id"] : nil;
-        if(isChannelID(roomID))
+        if(FMIsChannelID(roomID))
             channelID = roomID;
     }
     if(!channelID)
@@ -2103,7 +2098,7 @@ static void joinedChannel(id channelID);
 
 - (id)joinChannelName:(NSString *)channelName channelId:(NSString *)channelID {
     NSString *key = channelKey(channelName);
-    if(key && isChannelID(channelID)) {
+    if(key && FMIsChannelID(channelID)) {
         @synchronized(channelIDsByName) {
             channelIDsByName[key] = channelID;
         }
@@ -2114,7 +2109,7 @@ static void joinedChannel(id channelID);
         FMLog("Joining chat %@ without a channel ID", key);
         dispatch_async(emoteQueue, ^{
             NSString *lookedUpID = [emoteManager.httpClient channelIDForLogin:key];
-            if(!isChannelID(lookedUpID))
+            if(!FMIsChannelID(lookedUpID))
                 return;
             @synchronized(channelIDsByName) {
                 channelIDsByName[key] = lookedUpID;
@@ -2254,7 +2249,7 @@ static void joinedChannel(id channelID) {
 
     NSString *channel = [NSString stringWithFormat:@"%@", channelID];
     FMLog("Joined channel %@", channel);
-    if(isChannelID(channel)) {
+    if(FMIsChannelID(channel)) {
         loadChannelEmotes(channel, nil);
         FMChannelPointsCheckChannel(channel);
     }

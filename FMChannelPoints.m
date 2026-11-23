@@ -1,6 +1,7 @@
 #import "FMChannelPoints.h"
 #import "FMLog.h"
 #import "FMSettings.h"
+#import "FMUtilities.h"
 #import <objc/runtime.h>
 
 // The React Native screen's native module for Twitch's integrity token (Twitch's TwitchRNIntegrity), which it gets from
@@ -41,11 +42,6 @@ static dispatch_queue_t pointsQueue(void) {
 
 static BOOL claimingEnabled(void) {
     return [NSUserDefaults.standardUserDefaults boolForKey:FMClaimChannelPointsKey];
-}
-
-static BOOL isNumericID(id value) {
-    return [value isKindOfClass:[NSString class]] && [(NSString *)value length]
-        && [(NSString *)value rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet].invertedSet].location == NSNotFound;
 }
 
 static id valueAt(id json, NSArray<NSString *> *path) {
@@ -268,7 +264,7 @@ static void findClaims(id json, NSUInteger depth, void (^found)(NSString *channe
     } else if([json isKindOfClass:[NSDictionary class]]) {
         NSDictionary *claim = valueAt(json, @[@"data", @"claim"]);
         if([@"claim-available" isEqual:json[@"type"]] && [claim isKindOfClass:[NSDictionary class]]) {
-            if(isNumericID(claim[@"channel_id"]) && [claim[@"id"] isKindOfClass:[NSString class]])
+            if(FMIsChannelID(claim[@"channel_id"]) && [claim[@"id"] isKindOfClass:[NSString class]])
                 found(claim[@"channel_id"], claim[@"id"]);
             else
                 FMLog("claim-available without a channel or claim ID: %@", [claim.allKeys componentsJoinedByString:@", "]);
@@ -290,7 +286,7 @@ void FMChannelPointsHandleMessage(NSString *message) {
 }
 
 void FMChannelPointsCheckChannel(NSString *channelID) {
-    if(!isNumericID(channelID) || !claimingEnabled())
+    if(!FMIsChannelID(channelID) || !claimingEnabled())
         return;
     dispatch_async(pointsQueue(), ^{
         checkChannel(channelID);
