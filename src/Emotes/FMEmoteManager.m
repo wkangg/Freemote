@@ -1,6 +1,6 @@
 #import "FMEmoteManager.h"
-#import "FMLog.h"
-#import "FMSettings.h"
+#import "Log/FMLog.h"
+#import "Settings/FMSettings.h"
 
 @interface FMEmoteManager ()
 // Channels whose requests have all finished. Their emotes are published as each request finishes, before this.

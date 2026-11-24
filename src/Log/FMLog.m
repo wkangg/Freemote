@@ -1,5 +1,5 @@
 #import "FMLog.h"
-#import "FMSettings.h"
+#import "Settings/FMSettings.h"
 #import <os/log.h>
 
 static const unsigned long long kMaxLogSize = 10 * 1024 * 1024;
