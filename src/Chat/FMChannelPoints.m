@@ -1,6 +1,6 @@
 #import "FMChannelPoints.h"
-#import "FMLog.h"
-#import "FMSettings.h"
+#import "Log/FMLog.h"
+#import "Settings/FMSettings.h"
 #import "FMUtilities.h"
 #import <objc/runtime.h>
 

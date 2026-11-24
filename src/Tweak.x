@@ -1,11 +1,11 @@
 #import "Tweak.h"
-#import "FMChannelPoints.h"
-#import "FMEmoteManager.h"
-#import "FMLog.h"
-#import "FMReactNativePatch.h"
-#import "FMRecentMessages.h"
-#import "FMSettings.h"
+#import "Chat/FMChannelPoints.h"
+#import "Chat/FMRecentMessages.h"
+#import "Emotes/FMEmoteManager.h"
+#import "Emotes/FMReactNativePatch.h"
 #import "FMUtilities.h"
+#import "Log/FMLog.h"
+#import "Settings/FMSettings.h"
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <dlfcn.h>

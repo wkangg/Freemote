@@ -16,8 +16,8 @@ TWEAK_NAME = Freemote
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
 PACKAGE_VERSION := $(shell grep -i '^Version:' control | cut -d' ' -f2)$(if $(GIT_COMMIT),+$(GIT_COMMIT))
 
-Freemote_FILES = Tweak.x $(wildcard *.m)
-Freemote_CFLAGS = -fobjc-arc -DFREEMOTE_VERSION='"$(PACKAGE_VERSION)"'
+Freemote_FILES = $(wildcard src/*.x src/*/*.x src/*.m src/*/*.m)
+Freemote_CFLAGS = -fobjc-arc -Isrc -DFREEMOTE_VERSION='"$(PACKAGE_VERSION)"'
 Freemote_FRAMEWORKS = UIKit
 Freemote_LOGOS_DEFAULT_GENERATOR = internal
 ifeq ($(SIDELOADED),1)

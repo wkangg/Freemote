@@ -1,6 +1,6 @@
 #import "FMSettings.h"
-#import "FMLog.h"
-#import "FMRecentMessages.h"
+#import "Log/FMLog.h"
+#import "Chat/FMRecentMessages.h"
 
 NSString *const FMBTTVEnabledKey = @"FreemoteBTTVEnabled";
 NSString *const FMFFZEnabledKey = @"FreemoteFFZEnabled";

@@ -50,6 +50,14 @@ THEOS_PACKAGE_SCHEME=rootless make package
 SIDELOADED=1 IPA=/path/to/decrypted/Twitch.ipa make package
 ```
 
+| Path | What's there |
+| --- | --- |
+| `src/Tweak.x` | Hooks into Twitch's chat, emote rendering and settings |
+| `src/Emotes/` | Third-party emote loading (BTTV, FFZ, 7TV) and the React Native emote patch |
+| `src/Chat/` | Recent messages history and channel points auto-claim |
+| `src/Settings/` | Settings storage, settings screen and log viewer |
+| `src/Log/` | Debug log |
+
 ## Logs
 
 Turn on **Debug Log** in Freemote's settings to record a log you can view and share from **View Log**. Freemote also

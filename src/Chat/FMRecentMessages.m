@@ -1,5 +1,5 @@
 #import "FMRecentMessages.h"
-#import "FMLog.h"
+#import "Log/FMLog.h"
 #import "FMUtilities.h"
 
 // More than the chat holds: deleted messages are among them, and are left out unless they're kept
