@@ -3,7 +3,7 @@
 A tweak that brings [BTTV](https://betterttv.com), [FFZ](https://www.frankerfacez.com) and [7TV](https://7tv.app)
 emotes to the Twitch iOS app.
 
-Originally written by [gilesgc](https://github.com/gilesgc/Freemote); this fork updates it for Twitch 31.x and newer (last tested: 32.1).
+Originally written by [gilesgc](https://github.com/gilesgc/Freemote); this fork updates it for Twitch 31.x and newer (last tested: 32.2).
 
 ## Features
 
